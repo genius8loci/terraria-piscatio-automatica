@@ -3,14 +3,13 @@
 //! Имена полей и семантика проверены по декомпиляции конкретной версии,
 //! см. `docs/research-1.4.5.6.md`.
 
-use windows::Win32::System::Com::IDispatch;
 use windows::core::Result;
 
-use crate::clr::{Clr, Field, Var, array_get, call, get_type};
+use crate::clr::{Clr, Field, Method, Var, array_get};
 
 /// Размер `Main.projectile` в 1.4.5.6.
 const MAX_PROJECTILES: i32 = 1001;
-/// Размер `Player.inventory`; слоты 0..49 — основная сетка.
+/// Размер `Player.inventory` — 59; слоты 0..49 это основная сетка.
 const INVENTORY_MAIN_SLOTS: i32 = 50;
 
 /// Снимок состояния поплавка.
@@ -45,12 +44,12 @@ impl Bobber {
 
 pub struct Game {
     _clr: Clr,
-    main: IDispatch,
 
     f_my_player: Field,
     f_player: Field,
     f_projectile: Field,
     f_throttle: Field,
+    f_version: Option<Field>,
 
     pr_active: Field,
     pr_bobber: Field,
@@ -60,6 +59,7 @@ pub struct Game {
 
     pl_inventory: Field,
     pl_control_use_item: Field,
+    pl_quick_stack: Method,
 
     it_type: Field,
     it_stack: Field,
@@ -70,37 +70,45 @@ impl Game {
     pub fn attach(verbose: bool) -> Result<Game> {
         let clr = Clr::attach(verbose)?;
 
-        let assembly = clr.assembly("Terraria")?;
-        crate::log!("сборка Terraria найдена");
+        let assembly = clr.assembly("Terraria", verbose)?;
+        if verbose {
+            crate::log!("шаг 4: сборка найдена — {}", assembly.full_name()?);
+        }
 
-        let main = get_type(&assembly, "Terraria.Main")?;
-        let projectile = get_type(&assembly, "Terraria.Projectile")?;
-        let player = get_type(&assembly, "Terraria.Player")?;
-        let item = get_type(&assembly, "Terraria.Item")?;
+        let main = assembly.get_type("Terraria.Main")?;
+        let projectile = assembly.get_type("Terraria.Projectile")?;
+        let player = assembly.get_type("Terraria.Player")?;
+        let item = assembly.get_type("Terraria.Item")?;
+        if verbose {
+            crate::log!("шаг 5: типы Main/Projectile/Player/Item получены");
+        }
 
         let game = Game {
-            f_my_player: Field::resolve(&main, "myPlayer")?,
-            f_player: Field::resolve(&main, "player")?,
-            f_projectile: Field::resolve(&main, "projectile")?,
-            f_throttle: Field::resolve(&main, "ThrottleWhenInactive")?,
+            f_my_player: main.field("myPlayer")?,
+            f_player: main.field("player")?,
+            f_projectile: main.field("projectile")?,
+            f_throttle: main.field("ThrottleWhenInactive")?,
+            f_version: main.field("versionNumber").ok(),
 
-            pr_active: Field::resolve(&projectile, "active")?,
-            pr_bobber: Field::resolve(&projectile, "bobber")?,
-            pr_owner: Field::resolve(&projectile, "owner")?,
-            pr_ai: Field::resolve(&projectile, "ai")?,
-            pr_local_ai: Field::resolve(&projectile, "localAI")?,
+            pr_active: projectile.field("active")?,
+            pr_bobber: projectile.field("bobber")?,
+            pr_owner: projectile.field("owner")?,
+            pr_ai: projectile.field("ai")?,
+            pr_local_ai: projectile.field("localAI")?,
 
-            pl_inventory: Field::resolve(&player, "inventory")?,
-            pl_control_use_item: Field::resolve(&player, "controlUseItem")?,
+            pl_inventory: player.field("inventory")?,
+            pl_control_use_item: player.field("controlUseItem")?,
+            pl_quick_stack: player.method("QuickStackAllChests")?,
 
-            it_type: Field::resolve(&item, "type")?,
-            it_stack: Field::resolve(&item, "stack")?,
-            it_bait: Field::resolve(&item, "bait")?,
+            it_type: item.field("type")?,
+            it_stack: item.field("stack")?,
+            it_bait: item.field("bait")?,
 
-            main,
             _clr: clr,
         };
-        crate::log!("все поля разрешены");
+        if verbose {
+            crate::log!("шаг 6: все поля и методы разрешены");
+        }
         Ok(game)
     }
 
@@ -109,19 +117,21 @@ impl Game {
     }
 
     /// `Main.player[Main.myPlayer]`.
-    pub fn local_player(&self) -> Result<Option<IDispatch>> {
+    pub fn local_player(&self) -> Result<Option<Var>> {
         let index = self.my_player()?;
         if index < 0 {
             return Ok(None);
         }
-        let Some(players) = self.f_player.get_static()?.as_object() else {
+        let players = self.f_player.get_static()?;
+        let player = array_get(&players, index)?;
+        if player.is_null() {
             return Ok(None);
-        };
-        Ok(array_get(&players, index)?.as_object())
+        }
+        Ok(Some(player))
     }
 
     /// Снимает троттлинг при потере фокуса: без этого свёрнутая игра
-    /// спит по 20 мс на кадр и рыбалка идёт втрое медленнее.
+    /// спит по 20 мс на кадр и рыбалка идёт заметно медленнее.
     pub fn set_inactive_throttle(&self, enabled: bool) -> Result<()> {
         self.f_throttle.set_static(Var::boolean(enabled))
     }
@@ -130,58 +140,79 @@ impl Game {
         Ok(self.f_throttle.get_static()?.as_bool().unwrap_or(true))
     }
 
+    pub fn version(&self) -> Option<String> {
+        self.f_version.as_ref()?.get_static().ok()?.as_string()
+    }
+
     /// Ищет поплавок локального игрока. У игрока он всегда один —
     /// наличие поплавка запрещает новый заброс (см. research-док).
-    pub fn find_bobber(&self) -> Result<Option<Bobber>> {
+    ///
+    /// `hint` — индекс с прошлого раза. Полный перебор 1001 снаряда стоит
+    /// пары тысяч COM-вызовов, поэтому сначала проверяем known-индекс.
+    pub fn find_bobber(&self, hint: Option<i32>) -> Result<Option<Bobber>> {
         let me = self.my_player()?;
         if me < 0 {
             return Ok(None);
         }
-        let Some(projectiles) = self.f_projectile.get_static()?.as_object() else {
-            return Ok(None);
-        };
+        let projectiles = self.f_projectile.get_static()?;
+
+        if let Some(i) = hint {
+            if (0..MAX_PROJECTILES).contains(&i) {
+                if let Some(bobber) = self.read_bobber(&projectiles, i, me)? {
+                    return Ok(Some(bobber));
+                }
+            }
+        }
 
         for i in 0..MAX_PROJECTILES {
-            let Some(projectile) = array_get(&projectiles, i)?.as_object() else {
-                continue;
-            };
-            if !self.pr_active.get(&projectile)?.as_bool().unwrap_or(false) {
+            if Some(i) == hint {
                 continue;
             }
-            if !self.pr_bobber.get(&projectile)?.as_bool().unwrap_or(false) {
-                continue;
+            if let Some(bobber) = self.read_bobber(&projectiles, i, me)? {
+                return Ok(Some(bobber));
             }
-            if self.pr_owner.get(&projectile)?.as_int().unwrap_or(-1) != me {
-                continue;
-            }
-
-            let ai = self.pr_ai.get(&projectile)?.as_object();
-            let local_ai = self.pr_local_ai.get(&projectile)?.as_object();
-            let (Some(ai), Some(local_ai)) = (ai, local_ai) else {
-                continue;
-            };
-
-            return Ok(Some(Bobber {
-                index: i,
-                ai0: array_get(&ai, 0)?.as_float().unwrap_or(0.0),
-                ai1: array_get(&ai, 1)?.as_float().unwrap_or(0.0),
-                local_ai1: array_get(&local_ai, 1)?.as_float().unwrap_or(0.0),
-            }));
         }
         Ok(None)
     }
 
+    fn read_bobber(&self, projectiles: &Var, i: i32, me: i32) -> Result<Option<Bobber>> {
+        {
+            let projectile = array_get(projectiles, i)?;
+            if projectile.is_null() {
+                return Ok(None);
+            }
+            if !self.pr_active.get(&projectile)?.as_bool().unwrap_or(false) {
+                return Ok(None);
+            }
+            if !self.pr_bobber.get(&projectile)?.as_bool().unwrap_or(false) {
+                return Ok(None);
+            }
+            if self.pr_owner.get(&projectile)?.as_int().unwrap_or(-1) != me {
+                return Ok(None);
+            }
+
+            let ai = self.pr_ai.get(&projectile)?;
+            let local_ai = self.pr_local_ai.get(&projectile)?;
+
+            Ok(Some(Bobber {
+                index: i,
+                ai0: array_get(&ai, 0)?.as_float().unwrap_or(0.0),
+                ai1: array_get(&ai, 1)?.as_float().unwrap_or(0.0),
+                local_ai1: array_get(&local_ai, 1)?.as_float().unwrap_or(0.0),
+            }))
+        }
+    }
+
     /// Суммарный стак наживки в инвентаре. Логика повторяет
     /// `Player.Fishing_GetBait`: предмет считается наживкой при `bait > 0`.
-    pub fn bait_total(&self, player: &IDispatch) -> Result<i32> {
-        let Some(inventory) = self.pl_inventory.get(player)?.as_object() else {
-            return Ok(0);
-        };
+    pub fn bait_total(&self, player: &Var) -> Result<i32> {
+        let inventory = self.pl_inventory.get(player)?;
         let mut total = 0;
         for i in 0..INVENTORY_MAIN_SLOTS {
-            let Some(item) = array_get(&inventory, i)?.as_object() else {
+            let item = array_get(&inventory, i)?;
+            if item.is_null() {
                 continue;
-            };
+            }
             let stack = self.it_stack.get(&item)?.as_int().unwrap_or(0);
             if stack <= 0 {
                 continue;
@@ -194,16 +225,15 @@ impl Game {
     }
 
     /// Свободные слоты основной сетки инвентаря.
-    pub fn free_slots(&self, player: &IDispatch) -> Result<i32> {
-        let Some(inventory) = self.pl_inventory.get(player)?.as_object() else {
-            return Ok(0);
-        };
+    pub fn free_slots(&self, player: &Var) -> Result<i32> {
+        let inventory = self.pl_inventory.get(player)?;
         let mut free = 0;
         for i in 0..INVENTORY_MAIN_SLOTS {
-            let Some(item) = array_get(&inventory, i)?.as_object() else {
+            let item = array_get(&inventory, i)?;
+            if item.is_null() {
                 free += 1;
                 continue;
-            };
+            }
             let empty = self.it_type.get(&item)?.as_int().unwrap_or(0) == 0
                 || self.it_stack.get(&item)?.as_int().unwrap_or(0) == 0;
             if empty {
@@ -215,21 +245,15 @@ impl Game {
 
     /// Эмулирует игровую кнопку «разложить по ближайшим сундукам».
     #[allow(dead_code)]
-    pub fn quick_stack_to_nearby_chests(&self, player: &IDispatch) -> Result<()> {
-        call(player, "QuickStackAllChests", &[])?;
+    pub fn quick_stack_to_nearby_chests(&self, player: &Var) -> Result<()> {
+        self.pl_quick_stack.invoke(player, &[])?;
         Ok(())
     }
 
     /// Жать «использовать предмет» будем из детура `Player.ItemCheck`,
-    /// но само поле разрешаем уже сейчас.
+    /// но поле разрешаем уже сейчас.
     #[allow(dead_code)]
-    pub fn set_control_use_item(&self, player: &IDispatch, pressed: bool) -> Result<()> {
+    pub fn set_control_use_item(&self, player: &Var, pressed: bool) -> Result<()> {
         self.pl_control_use_item.set(player, Var::boolean(pressed))
-    }
-
-    /// Диагностика: версия игры из `Main.versionNumber`, если поле есть.
-    pub fn version(&self) -> Option<String> {
-        let field = Field::resolve(&self.main, "versionNumber").ok()?;
-        field.get_static().ok()?.as_string()
     }
 }

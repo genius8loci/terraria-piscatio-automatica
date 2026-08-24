@@ -103,6 +103,21 @@ late binding'ом через `IDispatch`. Поля берутся **по име�
   `IID_ICorThreadpool`. Любой `GetInterface` с ним возвращает `E_NOINTERFACE`.
   Раскладка vtable при этом верная, поэтому интерфейс запрашивается вручную
   с настоящим IID из `mscoree.h` (см. `src/clr.rs`).
+- **Late binding через `IDispatch` к CLR неприменим.** Проверено на живой
+  CLR v4.0.30319: объект хостинга AppDomain не отдаёт `IDispatch` вообще
+  (`E_NOINTERFACE`), у `_AppDomain` слоты IDispatch — заглушки `E_NOTIMPL`,
+  а `System.Type` (RuntimeType) тоже без `IDispatch`. Работает только
+  типизированный vtable, слоты сняты из `mscorlib.tlb`.
+  Исключение — `_Assembly`: у него `IDispatch` есть, но он не нужен.
+- **`_AppDomain::GetDefaultDomain` требует предварительного `Start()`**,
+  иначе `E_UNEXPECTED`. В игре рантайм уже запущен, но вызов оставлен
+  на случай инжекта до старта CLR.
+- **`Type.GetMethod(String)` бросает `AmbiguousMatchException`** на
+  перегруженных методах. Годится только для уникальных имён вроде
+  `QuickStackAllChests`.
+- Managed-массивы маршалятся в SAFEARRAY (`Projectile[]` -> `VT_ARRAY|VT_UNKNOWN`,
+  `float[]` -> `VT_ARRAY|VT_R4`), поэтому индексируются напрямую,
+  без рефлексии.
 - Пересобрать DLL, пока она загружена в запущенную игру, нельзя — файл занят.
   Закройте игру либо переименуйте занятый файл: Windows разрешает переименование
   замапленной DLL, и сборка пройдёт.
