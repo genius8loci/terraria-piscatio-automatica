@@ -9,6 +9,7 @@ mod clr;
 mod config;
 mod game;
 pub mod logging;
+mod overlay;
 
 use std::ffi::c_void;
 use std::path::PathBuf;

@@ -1,6 +1,6 @@
 [package]
 name = "terraria-piscatio-automatica"
-version = "0.1.2"
+version = "0.2.1"
 edition = "2024"
 
 [lib]
@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_ClrHosting", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Ole", "Win32_System_SystemInformation"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_ClrHosting", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Ole", "Win32_System_SystemInformation", "Win32_Graphics_Direct3D9", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Memory"] }
 
 [profile.release]
 opt-level = "z"

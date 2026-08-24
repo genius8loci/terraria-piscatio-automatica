@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
-use crate::config::Config;
+use crate::config::{Config, FilterMode};
 use crate::game::Game;
-use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, log};
+use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, log, overlay};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// Полный перебор снарядов недёшев, поэтому состояние читаем реже опроса клавиш.
@@ -53,6 +53,43 @@ struct Watcher {
     last_observe: Instant,
     last_bite: i32,
     bobber_hint: Option<i32>,
+    /// Строки для панели оверлея.
+    state_line: String,
+    bobber_line: String,
+    stock_line: String,
+}
+
+impl Watcher {
+    fn publish(&self, config: &Config, enabled: bool) {
+        let filter = match config.filter_mode {
+            FilterMode::Blacklist => format!("чёрный список ({})", config.blacklist.len()),
+            FilterMode::Whitelist => format!("белый список ({})", config.whitelist.len()),
+        };
+        overlay::set_lines(vec![
+            format!("состояние : {}", self.state_line),
+            format!(
+                "рыбалка   : {}",
+                if enabled {
+                    "включена"
+                } else {
+                    "выключена"
+                }
+            ),
+            format!("фильтр    : {filter}"),
+            format!(
+                "сундуки   : {}",
+                if config.quick_stack_when_full {
+                    "разложить при заполнении"
+                } else {
+                    "не трогать"
+                }
+            ),
+            format!("поплавок  : {}", self.bobber_line),
+            format!("запасы    : {}", self.stock_line),
+            String::new(),
+            "вверх — панель, вниз — старт/стоп, Delete — выгрузка".to_string(),
+        ]);
+    }
 }
 
 pub fn run(dll_dir: PathBuf) {
@@ -84,7 +121,15 @@ pub fn run(dll_dir: PathBuf) {
         last_observe: Instant::now() - OBSERVE_INTERVAL,
         last_bite: 0,
         bobber_hint: None,
+        state_line: "ищу игру".to_string(),
+        bobber_line: "нет".to_string(),
+        stock_line: "неизвестно".to_string(),
     };
+
+    if overlay::install() {
+        log!("оверлей установлен, панель по стрелке вверх");
+    }
+    watcher.publish(&config, enabled);
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
         // Хоткеи опрашиваем первыми и всегда: выгрузка должна работать
@@ -99,6 +144,7 @@ pub fn run(dll_dir: PathBuf) {
         if key_ui.pressed() {
             let shown = !SHOW_UI.load(Ordering::Relaxed);
             SHOW_UI.store(shown, Ordering::Relaxed);
+            watcher.publish(&config, enabled);
             log!(
                 "UI {}",
                 if shown {
@@ -111,6 +157,7 @@ pub fn run(dll_dir: PathBuf) {
 
         if key_toggle.pressed() {
             enabled = !enabled;
+            watcher.publish(&config, enabled);
             log!(
                 "рыбалка {}",
                 if enabled {
@@ -127,6 +174,10 @@ pub fn run(dll_dir: PathBuf) {
             match Game::attach(verbose) {
                 Ok(attached) => {
                     log!("подключились к игре с попытки {attempts}");
+                    watcher.state_line = match attached.version() {
+                        Some(v) => format!("подключено, {v}"),
+                        None => "подключено".to_string(),
+                    };
                     if let Some(version) = attached.version() {
                         log!("версия игры: {version}");
                     }
@@ -139,6 +190,7 @@ pub fn run(dll_dir: PathBuf) {
                     }
                     if attempts >= ATTACH_ATTEMPTS {
                         gave_up = true;
+                        watcher.state_line = "игра не найдена".to_string();
                         log!(
                             "подключиться не удалось за {ATTACH_ATTEMPTS} попыток. \
                              Хоткеи продолжают работать, выгрузка по Delete доступна"
@@ -153,6 +205,7 @@ pub fn run(dll_dir: PathBuf) {
             if watcher.last_observe.elapsed() >= OBSERVE_INTERVAL {
                 watcher.last_observe = Instant::now();
                 observe(attached, &config, &mut watcher);
+                watcher.publish(&config, enabled);
             }
         }
 
@@ -183,6 +236,23 @@ fn observe(game: &Game, config: &Config, watcher: &mut Watcher) {
     match game.find_bobber(watcher.bobber_hint) {
         Ok(Some(bobber)) => {
             watcher.bobber_hint = Some(bobber.index);
+            watcher.bobber_line = if bobber.has_bite() {
+                let rolled = bobber.rolled();
+                format!(
+                    "#{} КЛЮЁТ {} {rolled} -> {}",
+                    bobber.index,
+                    if rolled > 0 { "предмет" } else { "NPC" },
+                    if config.should_pull(rolled) {
+                        "берём"
+                    } else {
+                        "пропуск"
+                    }
+                )
+            } else if bobber.is_reeling() {
+                format!("#{} тянется", bobber.index)
+            } else {
+                format!("#{} ждём, заряд {:.0}/660", bobber.index, bobber.local_ai1)
+            };
 
             if bobber.has_bite() {
                 let rolled = bobber.rolled();
@@ -221,9 +291,10 @@ fn observe(game: &Game, config: &Config, watcher: &mut Watcher) {
         }
         Ok(None) => {
             watcher.bobber_hint = None;
+            watcher.bobber_line = "не заброшен".to_string();
+            watcher.stock_line = stock(game, watcher.last_status.elapsed() >= STATUS_INTERVAL);
             if watcher.last_status.elapsed() >= STATUS_INTERVAL {
                 watcher.last_status = Instant::now();
-                report_idle(game);
             }
         }
         Err(e) => {
@@ -233,12 +304,22 @@ fn observe(game: &Game, config: &Config, watcher: &mut Watcher) {
     }
 }
 
-fn report_idle(game: &Game) {
+/// Наживка и свободные слоты. `verbose` дублирует значения в лог.
+fn stock(game: &Game, verbose: bool) -> String {
     let Ok(Some(player)) = game.local_player() else {
-        log!("поплавка нет, локальный игрок пока недоступен");
-        return;
+        if verbose {
+            log!("локальный игрок пока недоступен");
+        }
+        return "игрок недоступен".to_string();
     };
     let bait = game.bait_total(&player).unwrap_or(-1);
     let free = game.free_slots(&player).unwrap_or(-1);
-    log!("поплавка нет. наживка={bait}, свободных слотов={free}");
+    if verbose {
+        log!("поплавка нет. наживка={bait}, свободных слотов={free}");
+    }
+    if bait == 0 {
+        format!("НАЖИВКИ НЕТ, слотов {free}")
+    } else {
+        format!("наживка {bait}, слотов {free}")
+    }
 }
