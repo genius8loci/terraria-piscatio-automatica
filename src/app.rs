@@ -101,12 +101,26 @@ pub fn run(dll_dir: PathBuf) {
         if key_ui.pressed() {
             let shown = !SHOW_UI.load(Ordering::Relaxed);
             SHOW_UI.store(shown, Ordering::Relaxed);
-            log!("UI {}", if shown { "показан" } else { "скрыт" });
+            log!(
+                "UI {}",
+                if shown {
+                    "показан"
+                } else {
+                    "скрыт"
+                }
+            );
         }
 
         if key_toggle.pressed() {
             enabled = !enabled;
-            log!("рыбалка {}", if enabled { "включена" } else { "выключена" });
+            log!(
+                "рыбалка {}",
+                if enabled {
+                    "включена"
+                } else {
+                    "выключена"
+                }
+            );
             config.save(&dll_dir);
         }
 
@@ -183,7 +197,8 @@ fn attach_with_retry() -> Option<Game> {
         if SHUTDOWN.load(Ordering::Relaxed) {
             return None;
         }
-        match Game::attach() {
+        let verbose = attempt == 1 || attempt % 10 == 0;
+        match Game::attach(verbose) {
             Ok(game) => {
                 log!("подцепились к игре с попытки {attempt}");
                 return Some(game);

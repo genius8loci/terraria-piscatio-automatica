@@ -67,9 +67,8 @@ pub struct Game {
 }
 
 impl Game {
-    pub fn attach() -> Result<Game> {
-        let clr = Clr::attach()?;
-        crate::log!("CLR подцеплена, дефолтный AppDomain получен");
+    pub fn attach(verbose: bool) -> Result<Game> {
+        let clr = Clr::attach(verbose)?;
 
         let assembly = clr.assembly("Terraria")?;
         crate::log!("сборка Terraria найдена");

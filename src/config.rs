@@ -69,8 +69,8 @@ impl Default for Config {
             jitter_min_ms: 120,
             jitter_max_ms: 480,
             auto_potions: false,
-            hotkey_ui: 0x2D,     // VK_INSERT
-            hotkey_toggle: 0x23, // VK_END
+            hotkey_ui: 0x26,     // VK_UP
+            hotkey_toggle: 0x28, // VK_DOWN
             hotkey_unload: 0x2E, // VK_DELETE
         }
     }

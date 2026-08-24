@@ -30,7 +30,11 @@ fn sink() -> &'static Mutex<Sink> {
 /// только на кольцевом буфере, молча: падать из-за лога нельзя.
 pub fn init(dir: PathBuf) {
     let path = dir.join("piscatio.log");
-    let file = OpenOptions::new().create(true).append(true).open(&path).ok();
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok();
     if let Ok(mut s) = sink().lock() {
         s.file = file;
     }
