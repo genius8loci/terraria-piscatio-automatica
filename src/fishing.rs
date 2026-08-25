@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
+use crate::detour;
 use crate::game::Game;
 use crate::input;
 use crate::log;
@@ -15,6 +16,10 @@ use crate::log;
 const AFTER_PULL: u64 = 350;
 /// Пауза после заброса, пока поплавок летит.
 const AFTER_CAST: u64 = 700;
+/// Сколько ждать применения нажатия, прежде чем считать его потерянным.
+const CLICK_TIMEOUT: Duration = Duration::from_millis(1200);
+/// Как часто перечитывать наживку и слоты для панели.
+const STOCK_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct Fishing {
     pub enabled: bool,
@@ -25,6 +30,10 @@ pub struct Fishing {
     last_bite: i32,
     stopped: Option<String>,
     rng: u32,
+    /// Когда поставили нажатие в очередь — чтобы поймать потерянное.
+    click_sent: Option<Instant>,
+    last_stock: Instant,
+    warned_no_detour: bool,
 
     pub casts: u32,
     pub pulls: u32,
@@ -43,6 +52,9 @@ impl Fishing {
             last_bite: 0,
             stopped: None,
             rng: 0x9E37_79B9,
+            click_sent: None,
+            last_stock: Instant::now() - STOCK_INTERVAL,
+            warned_no_detour: false,
             casts: 0,
             pulls: 0,
             skips: 0,
@@ -58,6 +70,9 @@ impl Fishing {
         }
         if !self.enabled {
             return "выключена".to_string();
+        }
+        if !detour::is_active() {
+            return "детур не стоит — нажимать некому".to_string();
         }
         if self.aim.is_none() {
             return "жду первый заброс вручную".to_string();
@@ -107,7 +122,61 @@ impl Fishing {
         Duration::from_millis(base + extra)
     }
 
+    /// Ставит нажатие в очередь. Без детура применять его некому.
+    fn click(&mut self, aim: Option<(i32, i32)>) -> bool {
+        if !detour::is_active() {
+            if !self.warned_no_detour {
+                self.warned_no_detour = true;
+                log!("рыбалка: детур не стоит, нажать некому — автомат простаивает");
+            }
+            return false;
+        }
+        input::request_click(aim);
+        self.click_sent = Some(Instant::now());
+        true
+    }
+
+    /// Потерянное нажатие снимаем сами, иначе `busy()` навсегда останется
+    /// истинным и автомат встанет.
+    fn drop_stale_click(&mut self) {
+        let Some(sent) = self.click_sent else {
+            return;
+        };
+        if !input::busy() {
+            self.click_sent = None;
+            return;
+        }
+        if sent.elapsed() > CLICK_TIMEOUT {
+            input::cancel();
+            self.click_sent = None;
+            log!("ввод: нажатие не применилось за {CLICK_TIMEOUT:?}, снял команду");
+        }
+    }
+
+    fn refresh_stock(&mut self, game: &Game) -> (i32, i32) {
+        let Ok(Some(player)) = game.local_player() else {
+            self.stock_line = "игрок недоступен".to_string();
+            return (-1, -1);
+        };
+        let bait = game.bait_total(&player).unwrap_or(-1);
+        let free = game.free_slots(&player).unwrap_or(-1);
+        self.stock_line = if bait == 0 {
+            format!("НАЖИВКИ НЕТ, слотов {free}")
+        } else {
+            format!("наживка {bait}, слотов {free}")
+        };
+        (bait, free)
+    }
+
     pub fn tick(&mut self, game: &Game, config: &Config) {
+        self.drop_stale_click();
+
+        // Запасы показываем всегда, а не только перед забросом.
+        if self.last_stock.elapsed() >= STOCK_INTERVAL {
+            self.last_stock = Instant::now();
+            self.refresh_stock(game);
+        }
+
         match game.find_bobber(self.hint) {
             Ok(Some(bobber)) => {
                 self.hint = Some(bobber.index);
@@ -179,7 +248,9 @@ impl Fishing {
             return;
         }
 
-        input::request_click(None);
+        if !self.click(None) {
+            return;
+        }
         self.pulls += 1;
         log!("подсечка #{}: улов {rolled}", self.pulls);
         let pause = self.jitter(config, AFTER_PULL);
@@ -197,36 +268,30 @@ impl Fishing {
             return;
         }
 
-        // Запасы проверяем перед самым забросом.
-        let Ok(Some(player)) = game.local_player() else {
-            log!("рыбалка: локальный игрок недоступен");
+        // Запасы перечитываем прямо перед забросом.
+        let (bait, free) = self.refresh_stock(game);
+        self.last_stock = Instant::now();
+        if bait < 0 {
             return;
-        };
-        let bait = game.bait_total(&player).unwrap_or(-1);
-        let free = game.free_slots(&player).unwrap_or(-1);
-        self.stock_line = if bait == 0 {
-            format!("НАЖИВКИ НЕТ, слотов {free}")
-        } else {
-            format!("наживка {bait}, слотов {free}")
-        };
+        }
 
         if bait == 0 {
             self.stopped = Some("наживка кончилась".to_string());
             log!("рыбалка остановлена: наживка кончилась");
             return;
         }
-        if free == 0 {
-            if config.quick_stack_when_full {
+        if free == 0 && config.quick_stack_when_full {
+            if let Ok(Some(player)) = game.local_player() {
                 match game.quick_stack_to_nearby_chests(&player) {
                     Ok(()) => log!("инвентарь полон — разложил по ближайшим сундукам"),
                     Err(e) => log!("разложить по сундукам не удалось: {e}"),
                 }
-            } else {
-                log!("инвентарь полон, но раскладка выключена — ловим дальше");
             }
         }
 
-        input::request_click(Some(aim));
+        if !self.click(Some(aim)) {
+            return;
+        }
         self.casts += 1;
         log!("заброс #{} в точку {},{}", self.casts, aim.0, aim.1);
         let pause = self.jitter(config, AFTER_CAST);

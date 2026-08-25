@@ -87,6 +87,9 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 /// Пока false, перехватчики только зовут оригинал: нужно при выгрузке.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static FIRST_FRAME_LOGGED: AtomicBool = AtomicBool::new(false);
+/// Просьба освободить ресурсы; выполняется на потоке рендера.
+static RELEASE_REQUESTED: AtomicBool = AtomicBool::new(false);
+static RELEASED: AtomicBool = AtomicBool::new(false);
 
 /// Ресурсы держим сырыми указателями: у них не должно быть `Drop`,
 /// иначе после выгрузки DLL деструктор сработает по чужой памяти.
@@ -192,7 +195,31 @@ pub fn uninstall() {
     if !INSTALLED.swap(false, Ordering::SeqCst) {
         return;
     }
+
+    // Порядок здесь важен. Сначала гасим отрисовку: иначе кадр между
+    // освобождением и снятием хуков успевает создать ресурсы заново,
+    // и новая пара остаётся висеть.
     ACTIVE.store(false, Ordering::SeqCst);
+
+    // Ресурсы в D3DPOOL_DEFAULT нельзя просто бросить: пока они живы,
+    // устройство не может сделать Reset. Игра после этого падает при
+    // сворачивании — XNA освобождает свои render target'ы, а пересоздать
+    // их не может. Поэтому просим поток рендера освободить наши ресурсы
+    // и ждём подтверждения, и только потом снимаем хуки.
+    if FONT_TEXTURE.load(Ordering::SeqCst) != 0 || STATE_BLOCK.load(Ordering::SeqCst) != 0 {
+        RELEASED.store(false, Ordering::SeqCst);
+        RELEASE_REQUESTED.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
+        while !RELEASED.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if !RELEASED.load(Ordering::SeqCst) {
+            // Кадры не идут (игра свёрнута или встала) — освобождаем сами.
+            // Это хуже, чем с потока рендера, но утечка гарантированно
+            // ломает Reset, а так есть шанс обойтись.
+            release_resources("поток рендера не ответил");
+        }
+    }
 
     for i in 0..MAX_HOOKS {
         for slot in [&TARGET_PRESENT[i], &TARGET_RESET[i]] {
@@ -206,11 +233,6 @@ pub fn uninstall() {
             }
         }
     }
-    // Текстуру и state block намеренно не освобождаем: они принадлежат потоку
-    // рендера, а Release с чужого потока на не-многопоточном девайсе опаснее
-    // утечки одной текстуры.
-    FONT_TEXTURE.store(0, Ordering::SeqCst);
-    STATE_BLOCK.store(0, Ordering::SeqCst);
     crate::log!("оверлей: детуры сняты");
 }
 
@@ -389,6 +411,11 @@ unsafe fn present(
     window: *mut c_void,
     dirty: *const c_void,
 ) -> HRESULT {
+    if RELEASE_REQUESTED.swap(false, Ordering::SeqCst) {
+        release_resources("по запросу выгрузки");
+        RELEASED.store(true, Ordering::SeqCst);
+    }
+
     if ACTIVE.load(Ordering::Relaxed) {
         crate::FRAME.fetch_add(1, Ordering::Relaxed);
         if !FIRST_FRAME_LOGGED.swap(true, Ordering::SeqCst) {
@@ -416,7 +443,7 @@ unsafe fn reset(
     parameters: *mut D3DPRESENT_PARAMETERS,
 ) -> HRESULT {
     // Ресурсы в D3DPOOL_DEFAULT обязаны быть освобождены до Reset.
-    release_resources();
+    release_resources("хук Reset");
 
     let original = TRAMPOLINE_RESET[slot].load(Ordering::Relaxed);
     if original == 0 {
@@ -432,7 +459,7 @@ unsafe fn reset(
 // Ресурсы
 // ---------------------------------------------------------------------------
 
-fn release_resources() {
+fn release_resources(reason: &str) {
     let texture = FONT_TEXTURE.swap(0, Ordering::SeqCst);
     if texture != 0 {
         unsafe { drop(IDirect3DTexture9::from_raw(texture as *mut c_void)) };
@@ -441,12 +468,19 @@ fn release_resources() {
     if block != 0 {
         unsafe { drop(IDirect3DStateBlock9::from_raw(block as *mut c_void)) };
     }
+    if texture != 0 || block != 0 {
+        crate::log!("оверлей: ресурсы освобождены ({reason})");
+    }
 }
 
 fn ensure_resources(device: &IDirect3DDevice9) -> bool {
     if FONT_TEXTURE.load(Ordering::Relaxed) != 0 && STATE_BLOCK.load(Ordering::Relaxed) != 0 {
         return true;
     }
+    // Если уцелела половина пары, освобождаем её: иначе она утечёт
+    // и не даст устройству сделать Reset.
+    release_resources("пересоздание");
+
     let Some(Some(atlas)) = FONT.get() else {
         return false;
     };
@@ -461,9 +495,11 @@ fn ensure_resources(device: &IDirect3DDevice9) -> bool {
             return false;
         }
     };
-    FONT_TEXTURE.store(texture.into_raw() as usize, Ordering::SeqCst);
-    STATE_BLOCK.store(block.into_raw() as usize, Ordering::SeqCst);
-    crate::log!("оверлей: ресурсы созданы");
+    let texture_raw = texture.into_raw() as usize;
+    let block_raw = block.into_raw() as usize;
+    FONT_TEXTURE.store(texture_raw, Ordering::SeqCst);
+    STATE_BLOCK.store(block_raw, Ordering::SeqCst);
+    crate::log!("оверлей: ресурсы созданы (текстура 0x{texture_raw:08X}, блок 0x{block_raw:08X})");
     true
 }
 

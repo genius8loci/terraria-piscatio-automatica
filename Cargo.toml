@@ -1,6 +1,6 @@
 [package]
 name = "terraria-piscatio-automatica"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 authors = ["@Genius_Loci https://t.me/Genius_Loci"]
 description = "Коллектор данных с кассы"

@@ -29,7 +29,7 @@ use windows::Win32::System::Ole::{
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::System::Variant::{
     VARENUM, VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_ARRAY, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_I4,
-    VT_INT_PTR, VT_NULL, VT_R4, VT_UINT_PTR, VT_UNKNOWN, VT_VARIANT, VariantClear,
+    VT_INT, VT_INT_PTR, VT_NULL, VT_R4, VT_UINT, VT_UINT_PTR, VT_UNKNOWN, VT_VARIANT, VariantClear,
 };
 use windows::core::{BSTR, GUID, HRESULT, IUnknown, Interface, PWSTR, Result, w};
 
@@ -181,16 +181,18 @@ impl Var {
     /// Нативный указатель из managed-значения.
     ///
     /// `IntPtr` и результат `RuntimeMethodHandle.GetFunctionPointer()`
-    /// приезжают как `VT_INT_PTR` (0x16) — проверено на живой CLR.
-    /// Понадобится на этапе managed-детура.
-    #[allow(dead_code)]
+    /// приезжают как **`VT_INT` (22 = 0x16)**, а не `VT_INT_PTR` (37):
+    /// проверено на живой CLR. Остальные целочисленные теги принимаем
+    /// на случай других сборок рантайма.
     pub fn as_ptr(&self) -> Option<usize> {
         unsafe {
             let a = &self.0.Anonymous.Anonymous;
-            if a.vt == VT_INT_PTR || a.vt == VT_UINT_PTR {
-                return Some(a.Anonymous.lVal as usize);
-            }
-            if a.vt == VT_I4 {
+            if a.vt == VT_INT
+                || a.vt == VT_UINT
+                || a.vt == VT_INT_PTR
+                || a.vt == VT_UINT_PTR
+                || a.vt == VT_I4
+            {
                 return Some(a.Anonymous.lVal as usize);
             }
             None
@@ -200,7 +202,7 @@ impl Var {
     pub fn as_int(&self) -> Option<i32> {
         unsafe {
             let a = &self.0.Anonymous.Anonymous;
-            if a.vt == VT_I4 || a.vt == VT_INT_PTR || a.vt == VT_UINT_PTR {
+            if a.vt == VT_I4 || a.vt == VT_INT || a.vt == VT_UINT || a.vt == VT_INT_PTR {
                 Some(a.Anonymous.lVal)
             } else if a.vt == VT_R4 {
                 Some(a.Anonymous.fltVal as i32)

@@ -172,3 +172,10 @@ pub fn request_click(aim: Option<(i32, i32)>) {
 pub fn busy() -> bool {
     COMMAND.load(Ordering::Acquire) != CMD_NONE
 }
+
+/// Снимает зависшую команду: если детур не сработал, `busy()` иначе
+/// останется истинным навсегда и автомат встанет.
+pub fn cancel() {
+    COMMAND.store(CMD_NONE, Ordering::Release);
+    FAILURES.fetch_add(1, Ordering::Relaxed);
+}

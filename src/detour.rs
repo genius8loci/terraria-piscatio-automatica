@@ -95,6 +95,12 @@ pub fn uninstall() {
     crate::log!("детур ItemCheck снят");
 }
 
+/// Стоит ли детур. Пока нет — команды ставить в очередь бессмысленно:
+/// применить их некому.
+pub fn is_active() -> bool {
+    ACTIVE.load(Ordering::Relaxed)
+}
+
 /// Первые байты по адресу — чтобы в логе было видно, что именно патчим.
 pub fn peek(address: usize) -> String {
     if address == 0 {
