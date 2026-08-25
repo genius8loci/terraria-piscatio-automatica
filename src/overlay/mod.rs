@@ -35,11 +35,13 @@ use windows::Win32::Graphics::Direct3D9::{
     D3DDEVTYPE_HAL, D3DFMT_A8R8G8B8, D3DFMT_UNKNOWN, D3DFVF_DIFFUSE, D3DFVF_TEX1, D3DFVF_XYZRHW,
     D3DLOCKED_RECT, D3DPOOL_DEFAULT, D3DPRESENT_PARAMETERS, D3DPT_TRIANGLELIST,
     D3DRS_ALPHABLENDENABLE, D3DRS_CULLMODE, D3DRS_DESTBLEND, D3DRS_FOGENABLE, D3DRS_LIGHTING,
-    D3DRS_SCISSORTESTENABLE, D3DRS_SRCBLEND, D3DRS_STENCILENABLE, D3DRS_ZENABLE, D3DSBT_ALL,
-    D3DSWAPEFFECT_DISCARD, D3DTA_DIFFUSE, D3DTA_TEXTURE, D3DTOP_MODULATE, D3DTOP_SELECTARG1,
-    D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2, D3DTSS_ALPHAOP, D3DTSS_COLORARG1, D3DTSS_COLORARG2,
-    D3DTSS_COLOROP, D3DUSAGE_DYNAMIC, D3DVIEWPORT9, Direct3DCreate9, Direct3DCreate9Ex, IDirect3D9,
-    IDirect3D9Ex, IDirect3DDevice9, IDirect3DDevice9Ex, IDirect3DStateBlock9, IDirect3DTexture9,
+    D3DRS_SCISSORTESTENABLE, D3DRS_SRCBLEND, D3DRS_STENCILENABLE, D3DRS_ZENABLE, D3DSAMP_ADDRESSU,
+    D3DSAMP_ADDRESSV, D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSBT_ALL,
+    D3DSWAPEFFECT_DISCARD, D3DTA_DIFFUSE, D3DTA_TEXTURE, D3DTADDRESS_CLAMP, D3DTEXF_LINEAR,
+    D3DTEXF_NONE, D3DTEXF_POINT, D3DTEXTUREFILTERTYPE, D3DTOP_MODULATE, D3DTSS_ALPHAARG1,
+    D3DTSS_ALPHAARG2, D3DTSS_ALPHAOP, D3DTSS_COLORARG1, D3DTSS_COLORARG2, D3DTSS_COLOROP,
+    D3DUSAGE_DYNAMIC, D3DVIEWPORT9, Direct3DCreate9, Direct3DCreate9Ex, IDirect3D9, IDirect3D9Ex,
+    IDirect3DDevice9, IDirect3DDevice9Ex, IDirect3DStateBlock9, IDirect3DTexture9,
 };
 use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -52,31 +54,40 @@ use crate::SHOW_UI;
 use icons::IconAtlas;
 use xnb::GameFont;
 
-/// Палитра под инвентарные панели Terraria.
+/// Палитра игры. Оттенки взяты из её же кода и текстур, поэтому
+/// подбирать здесь почти нечего: панели и строки красятся белым,
+/// собственный цвет у них внутри текстуры.
 pub mod colors {
-    // Полупрозрачность как у инвентаря игры: сквозь панель видно мир.
-    pub const BORDER: u32 = 0xD8_18183A;
-    pub const FRAME: u32 = 0xE0_5A5CB8;
-    pub const BACK: u32 = 0xC8_2E3070;
-    pub const ROW: u32 = 0xD0_3F4197;
-    pub const ROW_BORDER: u32 = 0xC0_252858;
-    pub const TITLE: u32 = 0xFF_FFD75E;
-    pub const TEXT: u32 = 0xFF_E4E4F2;
-    pub const MUTED: u32 = 0xFF_9FA3D8;
-    pub const VALUE: u32 = 0xFF_FFC94A;
-    pub const ON: u32 = 0xFF_3FA34D;
-    pub const ON_TEXT: u32 = 0xFF_EAFBEA;
-    pub const OFF: u32 = 0xFF_8A3A3A;
-    pub const OFF_TEXT: u32 = 0xFF_F5E2E2;
-    pub const KNOB: u32 = 0xFF_1E1F42;
-    pub const TAB: u32 = 0xFF_3A3D82;
-    pub const TAB_HOVER: u32 = 0xFF_474BA0;
-    pub const TAB_ACTIVE: u32 = 0xFF_5A5CB8;
-    pub const SLOT: u32 = 0xFF_2A2C60;
-    pub const SLOT_ON: u32 = 0xFF_2F5B38;
-    pub const SLOT_ON_BORDER: u32 = 0xFF_5CD16E;
-    pub const MARK_ALLOW: u32 = 0xFF_5CD16E;
-    pub const MARK_DENY: u32 = 0xFF_D95757;
+    /// Фон окна: `new Color(63, 82, 151) * 0.7f` из `UIPanel` — сквозь
+    /// панель видно мир ровно так же, как в родном интерфейсе.
+    pub const PANEL: u32 = 0xB3_3F5297;
+    /// Обводка окна: `UIPanel.BorderColor` = чёрный.
+    pub const PANEL_BORDER: u32 = 0xFF_000000;
+    /// «Как есть»: текстура уже нужного цвета.
+    pub const PLAIN: u32 = 0xFF_FFFFFF;
+
+    // Умножение может только затемнить, поэтому состояние кнопки показываем
+    // прозрачностью: активная непрозрачна, спокойная просвечивает.
+    pub const BUTTON: u32 = 0xB4_FFFFFF;
+    pub const BUTTON_HOVER: u32 = 0xE6_FFFFFF;
+    pub const BUTTON_ACTIVE: u32 = 0xFF_FFFFFF;
+
+    /// Ползунок прокрутки в атласе белый — цвет ему задаём здесь.
+    pub const HANDLE: u32 = 0xFF_7C8CD8;
+    pub const HANDLE_HOVER: u32 = 0xFF_A8B6F0;
+
+    /// Ячейка инвентаря: игра рисует её слегка прозрачной.
+    pub const SLOT: u32 = 0xCC_FFFFFF;
+    pub const SLOT_OFF: u32 = 0x80_FFFFFF;
+
+    /// Жёлтый заголовков — тот же, что у игры в UI.
+    pub const TITLE: u32 = 0xFF_FFE745;
+    pub const TEXT: u32 = 0xFF_FFFFFF;
+    pub const MUTED: u32 = 0xFF_A2A8CE;
+    pub const VALUE: u32 = 0xFF_FFE745;
+    pub const ON: u32 = 0xFF_8CE79A;
+    /// Иконка выключенного зелья приглушается.
+    pub const ICON_OFF: u32 = 0x99_FFFFFF;
 }
 
 const D3D_SDK_VERSION: u32 = 32;
@@ -112,6 +123,10 @@ static RELEASED: AtomicBool = AtomicBool::new(false);
 /// Ресурсы держим сырыми указателями: у них не должно быть `Drop`,
 /// иначе после выгрузки DLL деструктор сработает по чужой памяти.
 static FONT_TEXTURE: AtomicUsize = AtomicUsize::new(0);
+/// Девайс, увиденный в `Present`: детуру `DrawCursor` его взять неоткуда.
+static DEVICE: AtomicUsize = AtomicUsize::new(0);
+/// Панель уже нарисована детуром курсора в этом кадре.
+static DREW_IN_CURSOR: AtomicBool = AtomicBool::new(false);
 static ICON_TEXTURE: AtomicUsize = AtomicUsize::new(0);
 static STATE_BLOCK: AtomicUsize = AtomicUsize::new(0);
 
@@ -250,6 +265,8 @@ pub fn uninstall() {
             }
         }
     }
+    DEVICE.store(0, Ordering::SeqCst);
+    DREW_IN_CURSOR.store(false, Ordering::SeqCst);
     crate::log!("оверлей: детуры сняты");
 }
 
@@ -446,14 +463,20 @@ unsafe fn present(
         RELEASED.store(true, Ordering::SeqCst);
     }
 
+    DEVICE.store(device as usize, Ordering::Relaxed);
+
     if ACTIVE.load(Ordering::Relaxed) {
         crate::FRAME.fetch_add(1, Ordering::Relaxed);
         if !FIRST_FRAME_LOGGED.swap(true, Ordering::SeqCst) {
             crate::log!("оверлей: первый кадр перехвачен, рендер работает");
         }
-        if SHOW_UI.load(Ordering::Relaxed) {
+        // Обычно панель рисует детур `DrawCursor` — там она ложится под
+        // курсор игры. Сюда доходим, только если детур не встал или игра
+        // в этом кадре курсор не рисовала: тогда рисуем сами, вместе с ним.
+        let already = DREW_IN_CURSOR.swap(false, Ordering::SeqCst);
+        if !already && SHOW_UI.load(Ordering::Relaxed) {
             // Паника внутри чужого кадра убьёт игру — гасим на месте.
-            let _ = catch_unwind(AssertUnwindSafe(|| unsafe { draw(device) }));
+            let _ = catch_unwind(AssertUnwindSafe(|| unsafe { draw(device, true) }));
         }
     }
 
@@ -497,7 +520,6 @@ fn release_resources(reason: &str) {
     let icons = ICON_TEXTURE.swap(0, Ordering::SeqCst);
     if icons != 0 {
         unsafe { drop(IDirect3DTexture9::from_raw(icons as *mut c_void)) };
-        ICONS_STALE.store(true, Ordering::SeqCst);
     }
     let block = STATE_BLOCK.swap(0, Ordering::SeqCst);
     if block != 0 {
@@ -516,7 +538,8 @@ fn ensure_resources(device: &IDirect3DDevice9) -> bool {
     // и не даст устройству сделать Reset.
     release_resources("пересоздание");
 
-    let Some(Some(atlas)) = FONT.get() else {
+    // Шрифт грузим лениво: пробнику оверлея `install` не нужен.
+    let Some(atlas) = FONT.get_or_init(load_font).as_ref() else {
         return false;
     };
     let Some(texture) = create_font_texture(device, atlas) else {
@@ -584,62 +607,126 @@ fn create_texture(
 // Художник
 // ---------------------------------------------------------------------------
 
-/// Накопитель геометрии кадра: три партии, по одной на текстуру.
+/// Накопитель геометрии кадра. Партии две: всё оформление идёт одной
+/// текстурой-атласом, текст — другой. Внутри партии слои ложатся в порядке
+/// вызовов, поэтому отдельная партия под заливки не нужна.
 pub struct Painter<'a> {
-    solid: &'a mut Vec<Vertex>,
+    ui: &'a mut Vec<Vertex>,
     text: &'a mut Vec<Vertex>,
-    icons: &'a mut Vec<Vertex>,
     font: Option<&'a GameFont>,
     atlas: Option<&'a IconAtlas>,
     pub scale: f32,
 }
 
 impl<'a> Painter<'a> {
+    /// Заливка: берём белый квадратик из атласа, чтобы не разбивать партию.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: u32) {
-        push_quad(self.solid, x, y, w, h, color, 0.0, 0.0, 0.0, 0.0);
+        self.stretch(icons::WHITE, x, y, w, h, color);
     }
 
-    /// Прямоугольник со скруглёнными углами — как ячейки хотбара.
-    /// Собирается из горизонтальных полосок: квад у нас единственный примитив.
-    pub fn rounded(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) {
-        let r = radius.min(w * 0.5).min(h * 0.5).max(0.0);
-        if r < 1.0 {
-            self.rect(x, y, w, h, color);
+    /// Текстура целиком, растянутая в прямоугольник.
+    pub fn stretch(&mut self, id: i32, x: f32, y: f32, w: f32, h: f32, color: u32) {
+        let Some(atlas) = self.atlas else {
             return;
-        }
-        self.rect(x, y + r, w, h - r * 2.0, color);
-        let steps = r.ceil() as i32;
-        for i in 0..steps {
-            let row = i as f32;
-            let dy = r - row - 0.5;
-            let dx = r - (r * r - dy * dy).max(0.0).sqrt();
-            let inset = dx.floor();
-            self.rect(x + inset, y + row, w - inset * 2.0, 1.0, color);
-            self.rect(x + inset, y + h - row - 1.0, w - inset * 2.0, 1.0, color);
+        };
+        let Some(rect) = atlas.get(id) else {
+            return;
+        };
+        let (tw, th) = (atlas.width as f32, atlas.height as f32);
+        push_quad(
+            self.ui,
+            x,
+            y,
+            w,
+            h,
+            color,
+            rect.x as f32 / tw,
+            rect.y as f32 / th,
+            (rect.x + rect.w) as f32 / tw,
+            (rect.y + rect.h) as f32 / th,
+        );
+    }
+
+    /// Девятичастная нарезка, как рисует свои панели сама игра: углы идут
+    /// как есть, края тянутся вдоль, середина заполняет остальное.
+    /// `inset` — ширина рамки в пикселях исходной текстуры.
+    #[allow(clippy::too_many_arguments)]
+    pub fn nine_slice(&mut self, id: i32, x: f32, y: f32, w: f32, h: f32, inset: f32, color: u32) {
+        let Some(atlas) = self.atlas else {
+            return;
+        };
+        let Some(rect) = atlas.get(id) else {
+            return;
+        };
+        let (tw, th) = (atlas.width as f32, atlas.height as f32);
+        // В исходнике рамка не может съесть больше половины текстуры,
+        // на экране — больше половины прямоугольника.
+        let su = inset.min(rect.w as f32 * 0.5);
+        let sv = inset.min(rect.h as f32 * 0.5);
+        let du = (inset * self.scale).round().min((w * 0.5).floor()).max(1.0);
+        let dv = (inset * self.scale).round().min((h * 0.5).floor()).max(1.0);
+
+        // Тройки «экран: начало, длина; текстура: начало, длина».
+        let cols = [
+            (x, du, rect.x as f32, su),
+            (
+                x + du,
+                w - du * 2.0,
+                rect.x as f32 + su,
+                rect.w as f32 - su * 2.0,
+            ),
+            (x + w - du, du, (rect.x + rect.w) as f32 - su, su),
+        ];
+        let rows = [
+            (y, dv, rect.y as f32, sv),
+            (
+                y + dv,
+                h - dv * 2.0,
+                rect.y as f32 + sv,
+                rect.h as f32 - sv * 2.0,
+            ),
+            (y + h - dv, dv, (rect.y + rect.h) as f32 - sv, sv),
+        ];
+
+        for (cx, cw, cu, cuw) in cols {
+            if cw <= 0.0 || cuw <= 0.0 {
+                continue;
+            }
+            for (ry, rh, rv, rvh) in rows {
+                if rh <= 0.0 || rvh <= 0.0 {
+                    continue;
+                }
+                push_quad(
+                    self.ui,
+                    cx,
+                    ry,
+                    cw,
+                    rh,
+                    color,
+                    cu / tw,
+                    rv / th,
+                    (cu + cuw) / tw,
+                    (rv + rvh) / th,
+                );
+            }
         }
     }
 
     /// Спрайт из атласа в натуральную величину с учётом масштаба.
-    pub fn sprite(&mut self, item: i32, x: f32, y: f32) {
+    pub fn sprite(&mut self, item: i32, x: f32, y: f32, color: u32) {
         let Some(atlas) = self.atlas else {
             return;
         };
         let Some(rect) = atlas.get(item) else {
             return;
         };
-        let tw = atlas.width as f32;
-        let th = atlas.height as f32;
-        push_quad(
-            self.icons,
+        self.stretch(
+            item,
             x.round(),
             y.round(),
             rect.w as f32 * self.scale,
             rect.h as f32 * self.scale,
-            0xFFFF_FFFF,
-            rect.x as f32 / tw,
-            rect.y as f32 / th,
-            (rect.x + rect.w) as f32 / tw,
-            (rect.y + rect.h) as f32 / th,
+            color,
         );
     }
 
@@ -707,9 +794,13 @@ impl<'a> Painter<'a> {
             * self.scale
     }
 
+    pub fn line_height(&self) -> f32 {
+        self.font.map(|f| f.line_height).unwrap_or(20.0) * self.scale
+    }
+
     pub fn text_centered(&mut self, x: f32, y: f32, w: f32, h: f32, value: &str, color: u32) {
         let width = self.measure(value);
-        let line = self.font.map(|f| f.line_height).unwrap_or(20.0) * self.scale;
+        let line = self.line_height();
         self.text(x + (w - width) * 0.5, y + (h - line) * 0.5, value, color);
     }
 
@@ -719,30 +810,24 @@ impl<'a> Painter<'a> {
     }
 
     /// Иконка предмета вписывается в клетку с сохранением пропорций.
-    pub fn icon(&mut self, item: i32, x: f32, y: f32, w: f32, h: f32) {
+    pub fn icon(&mut self, item: i32, x: f32, y: f32, w: f32, h: f32, color: u32) {
         let Some(atlas) = self.atlas else {
             return;
         };
         let Some(rect) = atlas.get(item) else {
             return;
         };
-        let pad = 8.0 * self.scale;
+        let pad = 10.0 * self.scale;
         let fit = ((w - pad) / rect.w as f32).min((h - pad) / rect.h as f32);
         let dw = rect.w as f32 * fit;
         let dh = rect.h as f32 * fit;
-        let tw = atlas.width as f32;
-        let th = atlas.height as f32;
-        push_quad(
-            self.icons,
+        self.stretch(
+            item,
             (x + (w - dw) * 0.5).round(),
             (y + (h - dh) * 0.5).round(),
             dw,
             dh,
-            0xFFFF_FFFF,
-            rect.x as f32 / tw,
-            rect.y as f32 / th,
-            (rect.x + rect.w) as f32 / tw,
-            (rect.y + rect.h) as f32 / th,
+            color,
         );
     }
 }
@@ -769,42 +854,68 @@ pub fn set_icon_items(items: Vec<i32>) {
     ICONS_STALE.store(true, Ordering::SeqCst);
 }
 
-/// Собирает атлас иконок, если его ещё нет или набор поменялся.
+/// Держит атлас в актуальном виде. Пиксели собираются один раз: после
+/// `Reset` теряется только текстура, перечитывать файлы незачем.
 fn ensure_icons(device: &IDirect3DDevice9) {
-    if !ICONS_STALE.swap(false, Ordering::SeqCst) && ICON_TEXTURE.load(Ordering::Relaxed) != 0 {
-        return;
+    if ICONS_STALE.swap(false, Ordering::SeqCst) {
+        if let Ok(mut slot) = ICONS.lock() {
+            *slot = None;
+        }
+        let previous = ICON_TEXTURE.swap(0, Ordering::SeqCst);
+        if previous != 0 {
+            unsafe { drop(IDirect3DTexture9::from_raw(previous as *mut c_void)) };
+        }
     }
-    let items = ICON_ITEMS.lock().map(|i| i.clone()).unwrap_or_default();
-    if items.is_empty() {
-        return;
-    }
-    let Some(content) = crate::overlay::content_dir() else {
-        return;
-    };
-    let Some(atlas) = icons::build(&content, &items) else {
-        crate::log!("оверлей: атлас иконок собрать не вышло");
-        return;
-    };
-    crate::log!(
-        "оверлей: атлас иконок {}x{}, предметов {}",
-        atlas.width,
-        atlas.height,
-        atlas.len()
-    );
 
-    let previous = ICON_TEXTURE.swap(0, Ordering::SeqCst);
-    if previous != 0 {
-        unsafe { drop(IDirect3DTexture9::from_raw(previous as *mut c_void)) };
-    }
-    if let Some(texture) = create_texture(device, atlas.width, atlas.height, &atlas.pixels) {
-        ICON_TEXTURE.store(texture.into_raw() as usize, Ordering::SeqCst);
-    }
-    if let Ok(mut slot) = ICONS.lock() {
+    let Ok(mut slot) = ICONS.lock() else {
+        return;
+    };
+    if slot.is_none() {
+        let Some(content) = content_dir() else {
+            return;
+        };
+        let items = ICON_ITEMS.lock().map(|i| i.clone()).unwrap_or_default();
+        let Some(atlas) = icons::build(&content, &items) else {
+            crate::log!("оверлей: атлас собрать не вышло");
+            return;
+        };
+        crate::log!(
+            "оверлей: атлас {}x{}, картинок {}",
+            atlas.width,
+            atlas.height,
+            atlas.len()
+        );
         *slot = Some(atlas);
+    }
+
+    if ICON_TEXTURE.load(Ordering::Relaxed) == 0 {
+        let Some(atlas) = slot.as_ref() else {
+            return;
+        };
+        if let Some(texture) = create_texture(device, atlas.width, atlas.height, &atlas.pixels) {
+            ICON_TEXTURE.store(texture.into_raw() as usize, Ordering::SeqCst);
+        }
     }
 }
 
-unsafe fn draw(raw: *mut c_void) {
+/// Зовётся из детура `Main.DrawCursor`, с игрового потока и внутри кадра.
+/// Здесь весь интерфейс игры уже выгружен на экран, а курсор ещё нет.
+pub fn on_draw_cursor() {
+    if !ACTIVE.load(Ordering::Relaxed) || !SHOW_UI.load(Ordering::Relaxed) {
+        return;
+    }
+    let raw = DEVICE.load(Ordering::Relaxed);
+    if raw == 0 || DREW_IN_CURSOR.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        draw(raw as *mut c_void, false)
+    }));
+}
+
+/// `own_cursor` — рисовать ли курсор самим. Из детура не надо: игра
+/// нарисует свой сразу после нас.
+pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
     let Some(device) = (unsafe { IDirect3DDevice9::from_raw_borrowed(&raw) }) else {
         return;
     };
@@ -813,9 +924,8 @@ unsafe fn draw(raw: *mut c_void) {
     }
     ensure_icons(device);
 
-    let mut solid: Vec<Vertex> = Vec::with_capacity(512);
+    let mut ui_quads: Vec<Vertex> = Vec::with_capacity(2048);
     let mut text: Vec<Vertex> = Vec::with_capacity(2048);
-    let mut icon_quads: Vec<Vertex> = Vec::with_capacity(1024);
 
     let screen = unsafe {
         let mut viewport = D3DVIEWPORT9::default();
@@ -840,9 +950,8 @@ unsafe fn draw(raw: *mut c_void) {
         let atlas_guard = ICONS.lock().ok();
         let atlas = atlas_guard.as_ref().and_then(|g| g.as_ref());
         let mut painter = Painter {
-            solid: &mut solid,
+            ui: &mut ui_quads,
             text: &mut text,
-            icons: &mut icon_quads,
             font,
             atlas,
             scale: 1.0,
@@ -851,7 +960,7 @@ unsafe fn draw(raw: *mut c_void) {
             return;
         };
         let ui_state = guard.get_or_insert_with(ui::UiState::default);
-        ui::build(&mut painter, ui_state, input, screen)
+        ui::build(&mut painter, ui_state, input, screen, own_cursor)
     };
 
     // Пока курсор над окном, игра не должна считать клик игровым.
@@ -881,34 +990,26 @@ unsafe fn draw(raw: *mut c_void) {
     };
 
     unsafe {
-        // В Present сцена уже закрыта, а DrawPrimitiveUP работает только
-        // внутри сцены — открываем свою.
-        if device.BeginScene().is_err() {
-            return;
-        }
+        // В `Present` сцена уже закрыта, а `DrawPrimitiveUP` работает только
+        // внутри сцены — открываем свою. Из детура курсора мы, наоборот,
+        // внутри чужой сцены: `BeginScene` там вернёт ошибку, и это нормально.
+        let opened = device.BeginScene().is_ok();
         let _ = block.Capture();
         apply_states(device);
 
-        if !solid.is_empty() {
-            let _ = device.SetTexture(0, None);
-            let _ = device.SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1.0 as u32);
-            let _ = device.SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
-            let _ = device.SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1.0 as u32);
-            let _ = device.SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
-            draw_batch(device, &solid);
-        }
-
-        if !icon_quads.is_empty() {
-            if let Some(icons) = icon_texture {
-                let _ = device.SetTexture(0, icons);
-                modulate_stage(device);
-                draw_batch(device, &icon_quads);
-            }
+        if let Some(icons) = icon_texture.filter(|_| !ui_quads.is_empty()) {
+            let _ = device.SetTexture(0, icons);
+            modulate_stage(device);
+            // Оформление — пиксельная графика: тянем её без сглаживания,
+            // иначе на границах кусков атласа появляется кайма.
+            sampler(device, D3DTEXF_POINT);
+            draw_batch(device, &ui_quads);
         }
 
         if !text.is_empty() {
             let _ = device.SetTexture(0, font_texture);
             modulate_stage(device);
+            sampler(device, D3DTEXF_LINEAR);
             draw_batch(device, &text);
         }
 
@@ -916,7 +1017,9 @@ unsafe fn draw(raw: *mut c_void) {
         // нарисует ей свои спрайты.
         let _ = device.SetTexture(0, None);
         let _ = block.Apply();
-        let _ = device.EndScene();
+        if opened {
+            let _ = device.EndScene();
+        }
     }
 }
 
@@ -939,6 +1042,17 @@ unsafe fn modulate_stage(device: &IDirect3DDevice9) {
         let _ = device.SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE.0 as u32);
         let _ = device.SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
         let _ = device.SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    }
+}
+
+/// Фильтрация и режим краёв: у чужого кадра они могли остаться любыми.
+unsafe fn sampler(device: &IDirect3DDevice9, filter: D3DTEXTUREFILTERTYPE) {
+    unsafe {
+        let _ = device.SetSamplerState(0, D3DSAMP_MINFILTER, filter.0 as u32);
+        let _ = device.SetSamplerState(0, D3DSAMP_MAGFILTER, filter.0 as u32);
+        let _ = device.SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE.0 as u32);
+        let _ = device.SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP.0 as u32);
+        let _ = device.SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP.0 as u32);
     }
 }
 

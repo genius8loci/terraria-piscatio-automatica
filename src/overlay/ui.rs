@@ -1,24 +1,29 @@
 //! Раскладка интерфейса, попадания мыши и построение списка отрисовки.
 //!
 //! Режим непосредственный: каждый кадр заново считаем геометрию и тут же
-//! проверяем попадания. Состояние — только «раскрыто» и «какая вкладка»,
-//! всё остальное живёт в `state::Shared`.
+//! проверяем попадания. Состояние — только «раскрыто», «какая вкладка»
+//! и прокрутка фильтра, всё остальное живёт в `state::Shared`.
+//!
+//! Рисуем родными текстурами игры: окна и кнопки собираются девятичастной
+//! нарезкой, ячейки и переключатели — целыми спрайтами. Поэтому цвета здесь
+//! почти всегда белые: свой цвет у графики уже внутри.
 
 use super::state::{self, Mark};
-use super::{Painter, colors};
+use super::{Painter, colors, icons};
 
 /// Базовые размеры при масштабе 1.0; всё остальное — умножением.
 const ROW_H: f32 = 34.0;
 const PANEL_W: f32 = 560.0;
-const PAD: f32 = 10.0;
+const PAD: f32 = 12.0;
 const GAP: f32 = 6.0;
 const ARROW_W: f32 = 64.0;
 const ARROW_H: f32 = 26.0;
-const TOGGLE_W: f32 = 84.0;
-const TOGGLE_H: f32 = 24.0;
+/// Переключатель рисуется в натуральную величину текстуры: 14 пикселей.
+const TOGGLE: f32 = 14.0;
 const SLOT: f32 = 46.0;
-const ICON_CELL: f32 = 46.0;
-const FILTER_COLS: usize = 8;
+/// Поля от края экрана у окна фильтра, которое тянется во всю ширину.
+const SCREEN_MARGIN: f32 = 24.0;
+const BAR_W: f32 = 20.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -30,6 +35,8 @@ pub enum Tab {
 pub struct UiState {
     pub expanded: bool,
     pub tab: Tab,
+    /// Первая видимая строка сетки фильтра.
+    pub filter_row: usize,
 }
 
 impl Default for UiState {
@@ -37,6 +44,7 @@ impl Default for UiState {
         UiState {
             expanded: true,
             tab: Tab::None,
+            filter_row: 0,
         }
     }
 }
@@ -66,6 +74,7 @@ impl Rect {
 pub struct Layout<'a, 'b> {
     painter: &'a mut Painter<'b>,
     input: Input,
+    scale: f32,
     /// Курсор попал хоть в одну нашу область — игре клик отдавать нельзя.
     pub over_ui: bool,
 }
@@ -79,120 +88,122 @@ impl<'a, 'b> Layout<'a, 'b> {
         self.input.clicked
     }
 
-    fn radius(&self) -> f32 {
-        (7.0 * self.painter.scale).max(3.0)
+    fn hovered(&self, r: Rect) -> bool {
+        r.contains(self.input.x, self.input.y)
     }
 
+    /// Окно: фон и обводка поверх него — ровно так рисует панели игра.
     fn panel(&mut self, r: Rect) {
-        let rad = self.radius();
-        self.painter.rounded(
-            r.x - 2.0,
-            r.y - 2.0,
-            r.w + 4.0,
-            r.h + 4.0,
-            rad + 2.0,
-            colors::FRAME,
+        self.painter.nine_slice(
+            icons::PANEL,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            icons::PANEL_INSET,
+            colors::PANEL,
         );
-        self.painter.rounded(r.x, r.y, r.w, r.h, rad, colors::BACK);
+        self.painter.nine_slice(
+            icons::PANEL_BORDER,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            icons::PANEL_INSET,
+            colors::PANEL_BORDER,
+        );
     }
 
-    /// Строка с подложкой, как в инвентаре игры.
+    /// Строка внутри окна — та же подложка, что у списков игры.
     fn row_bg(&mut self, r: Rect) {
-        let rad = (self.radius() * 0.7).max(2.0);
-        self.painter
-            .rounded(r.x, r.y, r.w, r.h, rad, colors::ROW_BORDER);
-        self.painter
-            .rounded(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0, rad, colors::ROW);
+        self.painter.nine_slice(
+            icons::INNER_PANEL,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            icons::INNER_INSET,
+            colors::PLAIN,
+        );
     }
 
-    /// Курсор игры рисуем сами: мы отрисовываемся в Present, уже после того
-    /// как игра нарисовала свой, поэтому родной оказывается под панелью.
+    /// Ячейка инвентаря. Смысл слота показываем сменой текстуры, как игра:
+    /// у неё под избранное и под ячейки монет свои цветные подложки.
+    fn cell(&mut self, r: Rect, id: i32, tint: u32) {
+        self.painter.stretch(id, r.x, r.y, r.w, r.h, tint);
+    }
+
+    /// Переключатель из меню настроек: кольцо — выключено, диск — включено.
+    fn toggle(&mut self, r: Rect, on: bool) -> bool {
+        let clicked = self.hit(r);
+        let id = if on {
+            icons::TOGGLE_ON
+        } else {
+            icons::TOGGLE_OFF
+        };
+        let tint = if self.hovered(r) {
+            colors::PLAIN
+        } else if on {
+            colors::ON
+        } else {
+            colors::MUTED
+        };
+        self.painter.stretch(id, r.x, r.y, r.w, r.h, tint);
+        clicked
+    }
+
+    /// Переключатель, прижатый к правому краю строки, вместе с подписью слева.
+    fn switch_row(&mut self, r: Rect, label: &str, on: bool) -> bool {
+        self.row_bg(r);
+        let line = self.painter.line_height();
+        self.painter.text(
+            r.x + PAD * self.scale,
+            r.y + (r.h - line) * 0.5,
+            label,
+            colors::TEXT,
+        );
+        let size = (TOGGLE * self.scale).round();
+        let knob = Rect {
+            x: r.x + r.w - size - PAD * self.scale,
+            y: r.y + (r.h - size) * 0.5,
+            w: size,
+            h: size,
+        };
+        self.toggle(knob, on)
+    }
+
+    /// Строка «подпись — значение».
+    fn value_row(&mut self, r: Rect, label: &str, value: &str, color: u32) {
+        self.row_bg(r);
+        let line = self.painter.line_height();
+        let pad = PAD * self.scale;
+        self.painter
+            .text(r.x + pad, r.y + (r.h - line) * 0.5, label, colors::TEXT);
+        self.painter
+            .text_right(r.x, r.y + (r.h - line) * 0.5, r.w - pad, value, color);
+    }
+
+    /// Запасной курсор: нужен, только если панель рисуется из `Present`,
+    /// то есть после того, как игра нарисовала свой — он остался под панелью.
     fn draw_cursor(&mut self) {
         if self.input.x < 0.0 || self.input.y < 0.0 {
             return;
         }
         self.painter
-            .sprite(super::icons::CURSOR_ID, self.input.x, self.input.y);
-    }
-
-    /// Ячейка под иконку — скруглённая рамка, как у хотбара.
-    fn cell(&mut self, r: Rect, border: u32, fill: u32) {
-        let rad = (self.radius() * 0.8).max(3.0);
-        self.painter.rounded(r.x, r.y, r.w, r.h, rad, border);
-        self.painter
-            .rounded(r.x + 2.0, r.y + 2.0, r.w - 4.0, r.h - 4.0, rad, fill);
-    }
-
-    fn toggle(&mut self, r: Rect, on: bool) -> bool {
-        let clicked = self.hit(r);
-        let rad = (r.h * 0.5).max(2.0);
-        self.painter
-            .rounded(r.x, r.y, r.w, r.h, rad, colors::BORDER);
-        let half = r.w * 0.62;
-        if on {
-            self.painter
-                .rect(r.x + 1.0, r.y + 1.0, half, r.h - 2.0, colors::ON);
-            self.painter.rect(
-                r.x + half + 1.0,
-                r.y + 1.0,
-                r.w - half - 2.0,
-                r.h - 2.0,
-                colors::KNOB,
-            );
-            self.painter
-                .text_centered(r.x + 1.0, r.y, half, r.h, "Вкл", colors::ON_TEXT);
-        } else {
-            self.painter.rect(
-                r.x + 1.0,
-                r.y + 1.0,
-                r.w - half - 2.0,
-                r.h - 2.0,
-                colors::KNOB,
-            );
-            self.painter.rect(
-                r.x + r.w - half - 1.0,
-                r.y + 1.0,
-                half,
-                r.h - 2.0,
-                colors::OFF,
-            );
-            self.painter.text_centered(
-                r.x + r.w - half - 1.0,
-                r.y,
-                half,
-                r.h,
-                "Выкл",
-                colors::OFF_TEXT,
-            );
-        }
-        clicked
-    }
-
-    /// Кольцо статуса: рисуем четырьмя полосками, круг из квадов не собрать.
-    fn ring(&mut self, x: f32, y: f32, size: f32, color: u32) {
-        let t = (size * 0.18).max(1.0);
-        self.painter.rect(x, y, size, t, color);
-        self.painter.rect(x, y + size - t, size, t, color);
-        self.painter.rect(x, y + t, t, size - t * 2.0, color);
-        self.painter
-            .rect(x + size - t, y + t, t, size - t * 2.0, color);
+            .sprite(icons::CURSOR, self.input.x, self.input.y, colors::PLAIN);
     }
 
     fn button(&mut self, r: Rect, label: &str, active: bool) -> bool {
         let clicked = self.hit(r);
-        let hovered = r.contains(self.input.x, self.input.y);
-        let fill = if active {
-            colors::TAB_ACTIVE
-        } else if hovered {
-            colors::TAB_HOVER
+        let tint = if active {
+            colors::BUTTON_ACTIVE
+        } else if self.hovered(r) {
+            colors::BUTTON_HOVER
         } else {
-            colors::TAB
+            colors::BUTTON
         };
-        let rad = (self.radius() * 0.8).max(3.0);
         self.painter
-            .rounded(r.x, r.y, r.w, r.h, rad, colors::BORDER);
-        self.painter
-            .rounded(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0, rad, fill);
+            .nine_slice(icons::BUTTON, r.x, r.y, r.w, r.h, icons::BUTTON_INSET, tint);
         self.painter
             .text_centered(r.x, r.y, r.w, r.h, label, colors::TEXT);
         clicked
@@ -201,31 +212,34 @@ impl<'a, 'b> Layout<'a, 'b> {
 
 /// Строит кадр интерфейса. Возвращает `true`, если курсор над окнами —
 /// тогда клик не должен уходить в игру.
-pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32, f32)) -> bool {
+pub fn build(
+    painter: &mut Painter,
+    ui: &mut UiState,
+    input: Input,
+    screen: (f32, f32),
+    own_cursor: bool,
+) -> bool {
     let scale = (screen.1 / 1080.0).clamp(0.65, 2.5);
+    painter.scale = scale;
     let mut layout = Layout {
         painter,
         input,
+        scale,
         over_ui: false,
     };
-    layout.painter.scale = scale;
 
-    let panel_w = PANEL_W * scale;
+    let panel_w = (PANEL_W * scale).round();
     let x = ((screen.0 - panel_w) * 0.5).floor();
-    let mut y = 8.0 * scale;
+    let mut y = (8.0 * scale).round();
 
     // Стрелка сворачивания.
     let arrow = Rect {
-        x: (screen.0 - ARROW_W * scale) * 0.5,
+        x: ((screen.0 - ARROW_W * scale) * 0.5).floor(),
         y,
-        w: ARROW_W * scale,
-        h: ARROW_H * scale,
+        w: (ARROW_W * scale).round(),
+        h: (ARROW_H * scale).round(),
     };
-    if layout.button(
-        arrow,
-        if ui.expanded { "\u{25B2}" } else { "\u{25BC}" },
-        false,
-    ) {
+    if layout.button(arrow, "", false) {
         ui.expanded = !ui.expanded;
     }
     // Шрифт игры не содержит стрелок — рисуем треугольник сами.
@@ -239,16 +253,18 @@ pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32
     y += arrow.h + GAP * scale;
 
     if !ui.expanded {
-        layout.draw_cursor();
+        if own_cursor {
+            layout.draw_cursor();
+        }
         return layout.over_ui;
     }
 
-    let rows = 5.0;
-    let main_h = PAD * 2.0 * scale
-        + ROW_H * scale
-        + (ROW_H + GAP * 0.5) * scale * rows
-        + (SLOT + GAP) * scale
-        + (ROW_H + GAP) * scale;
+    let row_h = (ROW_H * scale).round();
+    let row_gap = (GAP * 0.5 * scale).round();
+    let slot = (SLOT * scale).round();
+    let pad = (PAD * scale).round();
+    // Заголовок, шесть строк, полка зелий и ряд вкладок.
+    let main_h = pad * 2.0 + row_h + (row_h + row_gap) * 6.0 + slot + GAP * scale + row_h;
     let main = Rect {
         x,
         y,
@@ -257,143 +273,111 @@ pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32
     };
     layout.panel(main);
 
-    let inner_x = main.x + PAD * scale;
-    let inner_w = main.w - PAD * 2.0 * scale;
-    let mut cursor = main.y + PAD * scale;
+    let inner_x = main.x + pad;
+    let inner_w = main.w - pad * 2.0;
+    let mut cursor = main.y + pad;
 
     layout
         .painter
         .text(inner_x, cursor, "Terraria Auto Fisher", colors::TITLE);
-    cursor += ROW_H * scale;
+    cursor += row_h;
 
-    let row_h = ROW_H * scale;
-    let toggle_w = TOGGLE_W * scale;
-    let toggle_h = TOGGLE_H * scale;
-
-    let row = |layout: &mut Layout, cursor: &mut f32| -> Rect {
+    let next_row = |cursor: &mut f32| -> Rect {
         let r = Rect {
             x: inner_x,
             y: *cursor,
             w: inner_w,
             h: row_h,
         };
-        layout.row_bg(r);
-        *cursor += row_h + GAP * 0.5 * scale;
+        *cursor += row_h + row_gap;
         r
     };
 
-    // --- переключатели -----------------------------------------------------
-    let (auto_fish, quick_stack, auto_potions, cast, free, potions) = state::with(|s| {
+    let (auto_fish, quick_stack, auto_potions, enemies, cast, free, potions) = state::with(|s| {
         (
             s.auto_fish,
             s.quick_stack,
             s.auto_potions,
+            s.pull_enemy_spawns,
             s.status.bobber_cast,
             s.status.free_slots,
             s.potions,
         )
     })
-    .unwrap_or((false, true, false, false, -1, [false; 3]));
+    .unwrap_or((false, true, false, false, false, -1, [false; 3]));
 
-    let r = row(&mut layout, &mut cursor);
-    layout.painter.text(
-        r.x + PAD * scale,
-        r.y + (r.h - line(scale)) * 0.5,
-        "Авторыбалка",
-        colors::TEXT,
-    );
-    let knob = Rect {
-        x: r.x + r.w - toggle_w - PAD * scale,
-        y: r.y + (r.h - toggle_h) * 0.5,
-        w: toggle_w,
-        h: toggle_h,
-    };
-    if layout.toggle(knob, auto_fish) {
+    let r = next_row(&mut cursor);
+    if layout.switch_row(r, "Авторыбалка", auto_fish) {
         state::with(|s| {
             s.auto_fish = !s.auto_fish;
             s.dirty = true;
         });
     }
 
-    let r = row(&mut layout, &mut cursor);
-    layout.painter.text(
-        r.x + PAD * scale,
-        r.y + (r.h - line(scale)) * 0.5,
-        "Сундуки разложить при заполнении",
-        colors::TEXT,
-    );
-    let knob = Rect {
-        x: r.x + r.w - toggle_w - PAD * scale,
-        y: r.y + (r.h - toggle_h) * 0.5,
-        w: toggle_w,
-        h: toggle_h,
-    };
-    if layout.toggle(knob, quick_stack) {
+    let r = next_row(&mut cursor);
+    if layout.switch_row(r, "Сундуки разложить при заполнении", quick_stack)
+    {
         state::with(|s| {
             s.quick_stack = !s.quick_stack;
             s.dirty = true;
         });
     }
 
+    let r = next_row(&mut cursor);
+    if layout.switch_row(r, "Подсекать врагов (Герцог Рыброн)", enemies)
+    {
+        state::with(|s| {
+            s.pull_enemy_spawns = !s.pull_enemy_spawns;
+            s.dirty = true;
+        });
+    }
+
     // --- статус поплавка ---------------------------------------------------
-    let r = row(&mut layout, &mut cursor);
+    // Тот же кружок, что у переключателей, но кликать по нему нечего.
+    let r = next_row(&mut cursor);
+    layout.row_bg(r);
+    let line = layout.painter.line_height();
     layout.painter.text(
-        r.x + PAD * scale,
-        r.y + (r.h - line(scale)) * 0.5,
+        r.x + pad,
+        r.y + (r.h - line) * 0.5,
         "Поплавок",
         colors::TEXT,
     );
-    let size = 14.0 * scale;
-    let ring_x = r.x + r.w - PAD * scale - 110.0 * scale;
-    layout.ring(
-        ring_x,
+    let label = if cast { "Заброшен" } else { "Нет" };
+    let label_w = layout.painter.measure(label);
+    let size = (TOGGLE * scale).round();
+    layout.painter.stretch(
+        if cast {
+            icons::TOGGLE_ON
+        } else {
+            icons::TOGGLE_OFF
+        },
+        r.x + r.w - pad - label_w - size - GAP * scale,
         r.y + (r.h - size) * 0.5,
         size,
-        if cast { colors::ON } else { colors::OFF },
+        size,
+        if cast { colors::ON } else { colors::MUTED },
     );
-    layout.painter.text(
-        ring_x + size + 8.0 * scale,
-        r.y + (r.h - line(scale)) * 0.5,
-        if cast { "Заброшен" } else { "Нет" },
-        if cast { colors::ON_TEXT } else { colors::MUTED },
+    layout.painter.text_right(
+        r.x,
+        r.y + (r.h - line) * 0.5,
+        r.w - pad,
+        label,
+        if cast { colors::ON } else { colors::MUTED },
     );
 
     // --- свободные ячейки --------------------------------------------------
-    let r = row(&mut layout, &mut cursor);
-    layout.painter.text(
-        r.x + PAD * scale,
-        r.y + (r.h - line(scale)) * 0.5,
-        "Свободные ячейки",
-        colors::TEXT,
-    );
+    let r = next_row(&mut cursor);
     let value = if free < 0 {
         "?".to_string()
     } else {
         free.to_string()
     };
-    layout.painter.text_right(
-        r.x,
-        r.y + (r.h - line(scale)) * 0.5,
-        r.w - PAD * scale,
-        &value,
-        colors::VALUE,
-    );
+    layout.value_row(r, "Свободные ячейки", &value, colors::VALUE);
 
     // --- автопитьё ---------------------------------------------------------
-    let r = row(&mut layout, &mut cursor);
-    layout.painter.text(
-        r.x + PAD * scale,
-        r.y + (r.h - line(scale)) * 0.5,
-        "АвтоПитьё зелий",
-        colors::TEXT,
-    );
-    let knob = Rect {
-        x: r.x + r.w - toggle_w - PAD * scale,
-        y: r.y + (r.h - toggle_h) * 0.5,
-        w: toggle_w,
-        h: toggle_h,
-    };
-    if layout.toggle(knob, auto_potions) {
+    let r = next_row(&mut cursor);
+    if layout.switch_row(r, "Автопитьё зелий", auto_potions) {
         state::with(|s| {
             s.auto_potions = !s.auto_potions;
             s.dirty = true;
@@ -401,10 +385,9 @@ pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32
     }
 
     // --- ячейки зелий ------------------------------------------------------
-    let slot = SLOT * scale;
     layout.painter.text(
         inner_x,
-        cursor + (slot - line(scale)) * 0.5,
+        cursor + (slot - line) * 0.5,
         "Зелья для автоиспользования:",
         colors::TEXT,
     );
@@ -423,19 +406,25 @@ pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32
                 s.dirty = true;
             });
         }
-        let (border, fill) = if on {
-            (colors::SLOT_ON_BORDER, colors::SLOT_ON)
-        } else {
-            (colors::BORDER, colors::SLOT)
-        };
-        layout.cell(cell, border, fill);
-        layout.painter.icon(*item, cell.x, cell.y, cell.w, cell.h);
+        layout.cell(
+            cell,
+            if on { icons::SLOT_ALLOW } else { icons::SLOT },
+            if on { colors::PLAIN } else { colors::SLOT_OFF },
+        );
+        layout.painter.icon(
+            *item,
+            cell.x,
+            cell.y,
+            cell.w,
+            cell.h,
+            if on { colors::PLAIN } else { colors::ICON_OFF },
+        );
         slot_x += slot + GAP * scale;
     }
     cursor += slot + GAP * scale;
 
     // --- вкладки -----------------------------------------------------------
-    let tab_w = (inner_w - GAP * scale) * 0.5;
+    let tab_w = ((inner_w - GAP * scale) * 0.5).floor();
     let filter_tab = Rect {
         x: inner_x,
         y: cursor,
@@ -443,7 +432,7 @@ pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32
         h: row_h,
     };
     let stats_tab = Rect {
-        x: inner_x + tab_w + GAP * scale,
+        x: inner_x + inner_w - tab_w,
         y: cursor,
         w: tab_w,
         h: row_h,
@@ -465,101 +454,102 @@ pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32
 
     let below = main.y + main.h + GAP * 2.0 * scale;
     match ui.tab {
-        Tab::Filter => filter_window(&mut layout, x, below, panel_w, scale),
+        Tab::Filter => filter_window(&mut layout, ui, below, screen, scale),
         Tab::Stats => stats_window(&mut layout, x, below, panel_w, scale),
         Tab::None => {}
     }
 
-    layout.draw_cursor();
+    if own_cursor {
+        layout.draw_cursor();
+    }
     layout.over_ui
 }
 
-fn line(scale: f32) -> f32 {
-    20.0 * scale
-}
-
-fn filter_window(layout: &mut Layout, x: f32, y: f32, w: f32, scale: f32) {
+/// Окно фильтра во всю ширину экрана: колонок столько, сколько влезает,
+/// остаток уходит в поля, чтобы сетка стояла ровно по центру.
+fn filter_window(layout: &mut Layout, ui: &mut UiState, y: f32, screen: (f32, f32), scale: f32) {
     let items = state::with(|s| s.fishable.clone()).unwrap_or_default();
-    let cell = ICON_CELL * scale;
-    let cols = FILTER_COLS;
-    let rows = items.len().div_ceil(cols).max(1);
-    let grid_h = rows as f32 * (cell + GAP * scale);
+    let pad = (PAD * scale).round();
+    let gap = (GAP * scale).round();
+    let cell = (SLOT * scale).round();
+    let row_h = (ROW_H * scale).round();
+    let margin = (SCREEN_MARGIN * scale).round();
+
+    let panel_w = (screen.0 - margin * 2.0).floor();
+    let x = margin;
+    // Сколько строк вообще можно показать, чтобы окно влезло в экран.
+    let head_h = pad + row_h * 2.0 + gap;
+    let available = (screen.1 - y - margin - head_h - pad).max(cell);
+    let fits = ((available + gap) / (cell + gap)).floor().max(1.0) as usize;
+
+    // Колонки считаем дважды: полоса прокрутки съедает ширину, но нужна она
+    // только если строки не влезли — иначе сетка уехала бы влево без причины.
+    let columns = |reserved: f32| {
+        let grid = panel_w - pad * 2.0 - reserved;
+        (((grid + gap) / (cell + gap)).floor().max(1.0)) as usize
+    };
+    let mut cols = columns(0.0);
+    let mut rows = items.len().div_ceil(cols).max(1);
+    let mut bar = 0.0;
+    if rows > fits {
+        bar = (BAR_W * scale).round() + gap;
+        cols = columns(bar);
+        rows = items.len().div_ceil(cols).max(1);
+    }
+    let visible = fits.min(rows);
+    let scrollable = rows > visible;
+
+    ui.filter_row = ui.filter_row.min(rows.saturating_sub(visible));
+
     let panel = Rect {
         x,
         y,
-        w,
-        h: PAD * 2.0 * scale + ROW_H * scale * 2.0 + grid_h,
+        w: panel_w,
+        h: head_h + visible as f32 * (cell + gap) - gap + pad,
     };
     layout.panel(panel);
 
-    let inner_x = panel.x + PAD * scale;
-    let mut cursor = panel.y + PAD * scale;
+    let inner_x = panel.x + pad;
+    let inner_w = panel.w - pad * 2.0;
+    let mut cursor = panel.y + pad;
     layout
         .painter
         .text(inner_x, cursor, "Фильтр", colors::TITLE);
-    cursor += ROW_H * scale;
+    cursor += row_h;
 
-    // Переключатель режима списка.
+    // Режим списка: белый — берём только отмеченное, чёрный — всё кроме.
     let whitelist = state::with(|s| s.whitelist_mode).unwrap_or(false);
     let r = Rect {
         x: inner_x,
         y: cursor,
-        w: panel.w - PAD * 2.0 * scale,
-        h: ROW_H * scale,
+        w: inner_w,
+        h: row_h,
     };
-    layout.row_bg(r);
-    layout.painter.text(
-        r.x + PAD * scale,
-        r.y + (r.h - line(scale)) * 0.5,
-        "Список",
-        colors::TEXT,
-    );
-    let knob = Rect {
-        x: r.x + r.w - TOGGLE_W * scale - PAD * scale,
-        y: r.y + (r.h - TOGGLE_H * scale) * 0.5,
-        w: TOGGLE_W * scale,
-        h: TOGGLE_H * scale,
+    let label = if whitelist {
+        "Список: белый — беру только отмеченное зелёным"
+    } else {
+        "Список: чёрный — беру всё, кроме отмеченного красным"
     };
-    let clicked = layout.hit(knob);
-    layout
-        .painter
-        .rect(knob.x, knob.y, knob.w, knob.h, colors::BORDER);
-    layout.painter.rect(
-        knob.x + 1.0,
-        knob.y + 1.0,
-        knob.w - 2.0,
-        knob.h - 2.0,
-        if whitelist { colors::ON } else { colors::OFF },
-    );
-    layout.painter.text_centered(
-        knob.x,
-        knob.y,
-        knob.w,
-        knob.h,
-        if whitelist {
-            "Белый"
-        } else {
-            "Чёрный"
-        },
-        colors::TEXT,
-    );
-    if clicked {
+    if layout.switch_row(r, label, whitelist) {
         state::with(|s| {
             s.whitelist_mode = !s.whitelist_mode;
             s.dirty = true;
         });
     }
-    cursor += ROW_H * scale + GAP * scale;
+    cursor += row_h + gap;
 
-    // Сетка предметов.
-    for (index, item) in items.iter().enumerate() {
-        let col = index % cols;
-        let row = index / cols;
-        let grid_w = cols as f32 * (cell + GAP * scale) - GAP * scale;
-        let start = panel.x + (panel.w - grid_w) * 0.5;
+    // Сетку центрируем: остаток от деления уходит в поля.
+    let used = cols as f32 * (cell + gap) - gap;
+    let start = inner_x + ((inner_w - bar - used) * 0.5).floor().max(0.0);
+    let first = ui.filter_row * cols;
+    let last = (first + visible * cols).min(items.len());
+
+    for (offset, item) in items[first..last].iter().enumerate() {
+        let col = offset % cols;
+        let row = offset / cols;
         let r = Rect {
-            x: start + col as f32 * (cell + GAP * scale),
-            y: cursor + row as f32 * (cell + GAP * scale),
+            x: start + col as f32 * (cell + gap),
+            y: cursor + row as f32 * (cell + gap),
             w: cell,
             h: cell,
         };
@@ -576,13 +566,79 @@ fn filter_window(layout: &mut Layout, x: f32, y: f32, w: f32, scale: f32) {
                 s.dirty = true;
             });
         }
-        let border = match mark {
-            Mark::Allow => colors::MARK_ALLOW,
-            Mark::Deny => colors::MARK_DENY,
-            Mark::Neutral => colors::BORDER,
+        let backing = match mark {
+            Mark::Allow => icons::SLOT_ALLOW,
+            Mark::Deny => icons::SLOT_DENY,
+            Mark::Neutral if layout.hovered(r) => icons::SLOT_HOVER,
+            Mark::Neutral => icons::SLOT,
         };
-        layout.cell(r, border, colors::SLOT);
-        layout.painter.icon(*item, r.x, r.y, r.w, r.h);
+        layout.cell(r, backing, colors::SLOT);
+        layout
+            .painter
+            .icon(*item, r.x, r.y, r.w, r.h, colors::PLAIN);
+    }
+
+    if scrollable {
+        let track = Rect {
+            x: panel.x + panel.w - pad - (BAR_W * scale).round(),
+            y: cursor,
+            w: (BAR_W * scale).round(),
+            h: visible as f32 * (cell + gap) - gap,
+        };
+        scrollbar(layout, track, ui, rows, visible, scale);
+    }
+}
+
+/// Полоса прокрутки как у игры. Колеса мыши мы не видим, поэтому клик выше
+/// ползунка листает страницу вверх, ниже — вниз.
+fn scrollbar(
+    layout: &mut Layout,
+    track: Rect,
+    ui: &mut UiState,
+    rows: usize,
+    visible: usize,
+    scale: f32,
+) {
+    layout.painter.nine_slice(
+        icons::BAR_TRACK,
+        track.x,
+        track.y,
+        track.w,
+        track.h,
+        icons::BAR_INSET,
+        colors::PLAIN,
+    );
+
+    let span = (rows - visible) as f32;
+    let handle_h = (track.h * visible as f32 / rows as f32).max(BAR_W * scale);
+    let travel = track.h - handle_h;
+    let handle_y = track.y + travel * ui.filter_row as f32 / span;
+    let handle = Rect {
+        x: track.x,
+        y: handle_y,
+        w: track.w,
+        h: handle_h,
+    };
+    layout.painter.nine_slice(
+        icons::BAR_HANDLE,
+        handle.x,
+        handle.y,
+        handle.w,
+        handle.h,
+        icons::BAR_INSET,
+        if layout.hovered(handle) {
+            colors::HANDLE_HOVER
+        } else {
+            colors::HANDLE
+        },
+    );
+
+    if layout.hit(track) {
+        if layout.input.y < handle.y {
+            ui.filter_row = ui.filter_row.saturating_sub(visible);
+        } else if layout.input.y >= handle.y + handle.h {
+            ui.filter_row = (ui.filter_row + visible).min(rows - visible);
+        }
     }
 }
 
@@ -609,43 +665,33 @@ fn stats_window(layout: &mut Layout, x: f32, y: f32, w: f32, scale: f32) {
     })
     .unwrap_or_default();
 
+    let pad = (PAD * scale).round();
+    let row_h = (ROW_H * scale).round();
+    let row_gap = (GAP * 0.5 * scale).round();
     let panel = Rect {
         x,
         y,
         w,
-        h: PAD * 2.0 * scale + ROW_H * scale + rows.len() as f32 * (ROW_H + GAP * 0.5) * scale,
+        h: pad * 2.0 + row_h + rows.len() as f32 * (row_h + row_gap) - row_gap,
     };
     layout.panel(panel);
 
-    let inner_x = panel.x + PAD * scale;
-    let inner_w = panel.w - PAD * 2.0 * scale;
-    let mut cursor = panel.y + PAD * scale;
+    let inner_x = panel.x + pad;
+    let inner_w = panel.w - pad * 2.0;
+    let mut cursor = panel.y + pad;
     layout
         .painter
         .text(inner_x, cursor, "Статистика", colors::TITLE);
-    cursor += ROW_H * scale;
+    cursor += row_h;
 
     for (label, value) in rows {
         let r = Rect {
             x: inner_x,
             y: cursor,
             w: inner_w,
-            h: ROW_H * scale,
+            h: row_h,
         };
-        layout.row_bg(r);
-        layout.painter.text(
-            r.x + PAD * scale,
-            r.y + (r.h - line(scale)) * 0.5,
-            &label,
-            colors::TEXT,
-        );
-        layout.painter.text_right(
-            r.x,
-            r.y + (r.h - line(scale)) * 0.5,
-            r.w - PAD * scale,
-            &value,
-            colors::VALUE,
-        );
-        cursor += ROW_H * scale + GAP * 0.5 * scale;
+        layout.value_row(r, &label, &value, colors::VALUE);
+        cursor += row_h + row_gap;
     }
 }

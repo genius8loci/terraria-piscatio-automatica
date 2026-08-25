@@ -125,6 +125,7 @@ pub fn run(dll_dir: PathBuf) {
                     apply_settings(&attached, &config);
                     let ready = install_detour(&attached);
                     state::with(|s| s.status.detour_ready = ready);
+                    install_cursor_detour(&attached);
                     load_fishable(&attached);
                     game = Some(attached);
                 }
@@ -182,6 +183,7 @@ fn push_config(config: &Config) {
         s.quick_stack = config.quick_stack_when_full;
         s.auto_potions = config.auto_potions;
         s.potions = config.potions;
+        s.pull_enemy_spawns = config.pull_enemy_spawns;
         s.whitelist_mode = config.filter_mode == FilterMode::Whitelist;
         s.filter.clear();
         for id in &config.whitelist {
@@ -199,6 +201,7 @@ fn pull_config(config: &mut Config) {
         config.quick_stack_when_full = s.quick_stack;
         config.auto_potions = s.auto_potions;
         config.potions = s.potions;
+        config.pull_enemy_spawns = s.pull_enemy_spawns;
         config.filter_mode = if s.whitelist_mode {
             FilterMode::Whitelist
         } else {
@@ -253,6 +256,20 @@ fn install_detour(game: &Game) -> bool {
         true
     } else {
         false
+    }
+}
+
+/// Детур на `Main.DrawCursor`: с ним панель ложится под курсор игры.
+/// Не встал — не беда, оверлей нарисует курсор сам из `Present`.
+fn install_cursor_detour(game: &Game) {
+    match game.draw_cursor_address() {
+        Ok(address) => {
+            log!("детур DrawCursor: адрес 0x{address:08X}");
+            if detour::install_cursor(address) {
+                log!("детур DrawCursor установлен");
+            }
+        }
+        Err(e) => log!("детур DrawCursor: адрес получить не удалось: {e}"),
     }
 }
 

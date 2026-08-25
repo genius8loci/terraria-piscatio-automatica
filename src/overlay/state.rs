@@ -52,6 +52,8 @@ pub struct Shared {
     pub auto_fish: bool,
     pub quick_stack: bool,
     pub auto_potions: bool,
+    /// Подсекать ли вражеские спавны: Герцог Рыброн и прочая нежить.
+    pub pull_enemy_spawns: bool,
     pub whitelist_mode: bool,
     /// Какие из трёх зелий пить.
     pub potions: [bool; 3],
@@ -70,6 +72,7 @@ impl Default for Shared {
             auto_fish: false,
             quick_stack: true,
             auto_potions: false,
+            pull_enemy_spawns: false,
             whitelist_mode: false,
             potions: [true, false, true],
             filter: HashMap::new(),
@@ -84,6 +87,11 @@ impl Default for Shared {
 impl Shared {
     /// Решение по улову с учётом режима списка и отметки предмета.
     pub fn should_pull(&self, item: i32) -> bool {
+        // Отрицательное значение — не предмет, а вражеский спавн: игра кладёт
+        // в `localAI[1]` минус id NPC. Фильтр по иконкам к ним неприменим.
+        if item < 0 {
+            return self.pull_enemy_spawns;
+        }
         match self.filter.get(&item).copied().unwrap_or(Mark::Neutral) {
             Mark::Allow => true,
             Mark::Deny => false,

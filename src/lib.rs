@@ -81,6 +81,7 @@ fn start() {
         // Детуры обязаны быть сняты до выгрузки: иначе следующий кадр
         // прыгнет по адресу уже отображённого кода.
         detour::uninstall();
+        detour::uninstall_cursor();
         overlay::uninstall();
         std::thread::sleep(std::time::Duration::from_millis(250));
 

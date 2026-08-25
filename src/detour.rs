@@ -1,4 +1,4 @@
-//! Inline-детур managed-метода.
+//! Inline-детуры managed-методов.
 //!
 //! Заброс и подсечка не могут идти через реальный ввод: при свёрнутом окне
 //! игра его игнорирует. Поэтому «нажатие» выставляется прямо в поле
@@ -13,6 +13,12 @@
 //! доигрывает оригинальный пролог. Так вопрос соглашения о вызове снимается
 //! целиком: оригинальный код получает регистры ровно в том виде, в каком
 //! они пришли.
+//!
+//! Второй детур — на `Main.DrawCursor`. Он нужен не ради данных, а ради
+//! момента: игра зовёт его сразу после `spriteBatch.End()`, то есть весь
+//! интерфейс уже выгружен на экран, а курсор ещё не нарисован. Рисуя панель
+//! здесь, мы получаем её поверх интерфейса и под курсором — без второго,
+//! своего курсора поверх чужого.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -108,4 +114,82 @@ pub fn peek(address: usize) -> String {
     }
     let bytes = unsafe { std::slice::from_raw_parts(address as *const u8, 16) };
     bytes.iter().map(|b| format!("{b:02X} ")).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Детур Main.DrawCursor
+// ---------------------------------------------------------------------------
+
+static CURSOR_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static CURSOR_TARGET: AtomicUsize = AtomicUsize::new(0);
+static CURSOR_INSTALLED: AtomicBool = AtomicBool::new(false);
+static CURSOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn cursor_handler() {
+    if !CURSOR_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::overlay::on_draw_cursor();
+    }));
+}
+
+/// Аргументы `DrawCursor` нам не нужны, поэтому обработчик зовём без них:
+/// регистры и стек уходят оригиналу нетронутыми.
+#[unsafe(naked)]
+unsafe extern "C" fn cursor_thunk() {
+    core::arch::naked_asm!(
+        "pushad",
+        "pushfd",
+        "call {handler}",
+        "popfd",
+        "popad",
+        "jmp dword ptr [{trampoline}]",
+        handler = sym cursor_handler,
+        trampoline = sym CURSOR_TRAMPOLINE,
+    )
+}
+
+pub fn install_cursor(address: usize) -> bool {
+    if CURSOR_INSTALLED.swap(true, Ordering::SeqCst) {
+        return true;
+    }
+    unsafe {
+        let target = address as *mut c_void;
+        let original = match MinHook::create_hook(target, cursor_thunk as *const () as *mut c_void)
+        {
+            Ok(o) => o,
+            Err(e) => {
+                crate::log!("детур DrawCursor: create_hook не удался: {e:?}");
+                CURSOR_INSTALLED.store(false, Ordering::SeqCst);
+                return false;
+            }
+        };
+        CURSOR_TRAMPOLINE.store(original as usize, Ordering::SeqCst);
+        if let Err(e) = MinHook::enable_hook(target) {
+            crate::log!("детур DrawCursor: enable_hook не удался: {e:?}");
+            CURSOR_INSTALLED.store(false, Ordering::SeqCst);
+            return false;
+        }
+        CURSOR_TARGET.store(address, Ordering::SeqCst);
+    }
+    CURSOR_ACTIVE.store(true, Ordering::SeqCst);
+    true
+}
+
+pub fn uninstall_cursor() {
+    if !CURSOR_INSTALLED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    // Гасим обработчик до снятия хука: кадр может идти прямо сейчас.
+    CURSOR_ACTIVE.store(false, Ordering::SeqCst);
+    let target = CURSOR_TARGET.swap(0, Ordering::SeqCst);
+    if target == 0 {
+        return;
+    }
+    unsafe {
+        let _ = MinHook::disable_hook(target as *mut c_void);
+        let _ = MinHook::remove_hook(target as *mut c_void);
+    }
+    crate::log!("детур DrawCursor снят");
 }

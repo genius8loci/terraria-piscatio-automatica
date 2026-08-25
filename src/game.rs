@@ -60,6 +60,7 @@ pub struct Game {
 
     /// Для получения адреса JIT-кода `Player.ItemCheck`.
     m_item_check: Method,
+    m_draw_cursor: Method,
     m_get_method_handle: Method,
     m_get_function_pointer: Method,
 
@@ -110,6 +111,7 @@ impl Game {
             f_mouse_y: main.field("mouseY")?,
             f_fish_drops: main.field("FishDropsDB")?,
             m_item_check: player.method("ItemCheck")?,
+            m_draw_cursor: main.method("DrawCursor")?,
             m_get_method_handle: method_base.method("get_MethodHandle")?,
             m_get_function_pointer: method_handle.method("GetFunctionPointer")?,
 
@@ -188,8 +190,17 @@ impl Game {
     /// точку входа; метод вызывается каждый кадр, так что к моменту
     /// подключения он давно скомпилирован.
     pub fn item_check_address(&self) -> Result<usize> {
-        let method = self.m_item_check.as_var();
-        let handle = self.m_get_method_handle.invoke(&method, &[])?;
+        self.jit_address(&self.m_item_check)
+    }
+
+    /// `Main.DrawCursor` — точка, где интерфейс уже выгружен, а курсор ещё нет.
+    pub fn draw_cursor_address(&self) -> Result<usize> {
+        self.jit_address(&self.m_draw_cursor)
+    }
+
+    /// Адрес машинного кода метода: `MethodBase.MethodHandle.GetFunctionPointer()`.
+    fn jit_address(&self, method: &Method) -> Result<usize> {
+        let handle = self.m_get_method_handle.invoke(&method.as_var(), &[])?;
         let pointer = self.m_get_function_pointer.invoke(&handle, &[])?;
         pointer
             .as_ptr()
