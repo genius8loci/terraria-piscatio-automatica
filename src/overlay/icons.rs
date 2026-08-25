@@ -14,6 +14,8 @@ const ATLAS_WIDTH: u32 = 1024;
 const GAP: u32 = 2;
 /// Иконки крупнее просто не влезут в ячейку сетки.
 const MAX_ICON: u32 = 48;
+/// Под этим id в атласе лежит курсор игры.
+pub const CURSOR_ID: i32 = -1;
 
 #[derive(Clone, Copy)]
 pub struct IconRect {
@@ -43,7 +45,15 @@ impl IconAtlas {
 /// Собирает атлас из иконок перечисленных предметов.
 /// Отсутствующие или слишком большие пропускаются молча.
 pub fn build(content: &Path, items: &[i32]) -> Option<IconAtlas> {
-    let mut loaded: Vec<(i32, xnb::Image)> = Vec::with_capacity(items.len());
+    let mut loaded: Vec<(i32, xnb::Image)> = Vec::with_capacity(items.len() + 1);
+
+    // Курсор игры кладём в тот же атлас под особым id: мы рисуем поверх
+    // всего в Present, поэтому родной курсор оказывается под панелью,
+    // и его приходится рисовать самим.
+    if let Some(cursor) = xnb::load_texture(&content.join("UI").join("Cursor_0.xnb")) {
+        loaded.push((CURSOR_ID, cursor));
+    }
+
     for &id in items {
         let path = content.join(format!("Item_{id}.xnb"));
         let Some(image) = xnb::load_texture(&path) else {

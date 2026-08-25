@@ -226,7 +226,10 @@ fn load_fishable(game: &Game) {
     match game.fishable_items() {
         Ok(items) => {
             log!("ловится предметов: {}", items.len());
-            overlay::set_icon_items(items.clone());
+            // В атлас кладём ещё и зелья: без них ячейки автопитья пустые.
+            let mut icons = items.clone();
+            icons.extend(crate::game::POTIONS.iter().map(|(item, _, _)| *item));
+            overlay::set_icon_items(icons);
             state::with(|s| s.fishable = items);
         }
         Err(e) => log!("список ловимого получить не удалось: {e}"),

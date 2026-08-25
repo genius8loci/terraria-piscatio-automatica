@@ -54,11 +54,12 @@ use xnb::GameFont;
 
 /// Палитра под инвентарные панели Terraria.
 pub mod colors {
-    pub const BORDER: u32 = 0xFF_18183A;
-    pub const FRAME: u32 = 0xFF_5A5CB8;
-    pub const BACK: u32 = 0xF2_2E3070;
-    pub const ROW: u32 = 0xFF_3A3D82;
-    pub const ROW_BORDER: u32 = 0xFF_252858;
+    // Полупрозрачность как у инвентаря игры: сквозь панель видно мир.
+    pub const BORDER: u32 = 0xD8_18183A;
+    pub const FRAME: u32 = 0xE0_5A5CB8;
+    pub const BACK: u32 = 0xC8_2E3070;
+    pub const ROW: u32 = 0xD0_3F4197;
+    pub const ROW_BORDER: u32 = 0xC0_252858;
     pub const TITLE: u32 = 0xFF_FFD75E;
     pub const TEXT: u32 = 0xFF_E4E4F2;
     pub const MUTED: u32 = 0xFF_9FA3D8;
@@ -596,6 +597,50 @@ pub struct Painter<'a> {
 impl<'a> Painter<'a> {
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: u32) {
         push_quad(self.solid, x, y, w, h, color, 0.0, 0.0, 0.0, 0.0);
+    }
+
+    /// Прямоугольник со скруглёнными углами — как ячейки хотбара.
+    /// Собирается из горизонтальных полосок: квад у нас единственный примитив.
+    pub fn rounded(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) {
+        let r = radius.min(w * 0.5).min(h * 0.5).max(0.0);
+        if r < 1.0 {
+            self.rect(x, y, w, h, color);
+            return;
+        }
+        self.rect(x, y + r, w, h - r * 2.0, color);
+        let steps = r.ceil() as i32;
+        for i in 0..steps {
+            let row = i as f32;
+            let dy = r - row - 0.5;
+            let dx = r - (r * r - dy * dy).max(0.0).sqrt();
+            let inset = dx.floor();
+            self.rect(x + inset, y + row, w - inset * 2.0, 1.0, color);
+            self.rect(x + inset, y + h - row - 1.0, w - inset * 2.0, 1.0, color);
+        }
+    }
+
+    /// Спрайт из атласа в натуральную величину с учётом масштаба.
+    pub fn sprite(&mut self, item: i32, x: f32, y: f32) {
+        let Some(atlas) = self.atlas else {
+            return;
+        };
+        let Some(rect) = atlas.get(item) else {
+            return;
+        };
+        let tw = atlas.width as f32;
+        let th = atlas.height as f32;
+        push_quad(
+            self.icons,
+            x.round(),
+            y.round(),
+            rect.w as f32 * self.scale,
+            rect.h as f32 * self.scale,
+            0xFFFF_FFFF,
+            rect.x as f32 / tw,
+            rect.y as f32 / th,
+            (rect.x + rect.w) as f32 / tw,
+            (rect.y + rect.h) as f32 / th,
+        );
     }
 
     /// Треугольник рисуем горизонтальными полосками: в шрифте игры

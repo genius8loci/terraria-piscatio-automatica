@@ -79,24 +79,55 @@ impl<'a, 'b> Layout<'a, 'b> {
         self.input.clicked
     }
 
+    fn radius(&self) -> f32 {
+        (7.0 * self.painter.scale).max(3.0)
+    }
+
     fn panel(&mut self, r: Rect) {
-        self.painter
-            .rect(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0, colors::BORDER);
-        self.painter
-            .rect(r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0, colors::FRAME);
-        self.painter.rect(r.x, r.y, r.w, r.h, colors::BACK);
+        let rad = self.radius();
+        self.painter.rounded(
+            r.x - 2.0,
+            r.y - 2.0,
+            r.w + 4.0,
+            r.h + 4.0,
+            rad + 2.0,
+            colors::FRAME,
+        );
+        self.painter.rounded(r.x, r.y, r.w, r.h, rad, colors::BACK);
     }
 
     /// Строка с подложкой, как в инвентаре игры.
     fn row_bg(&mut self, r: Rect) {
-        self.painter.rect(r.x, r.y, r.w, r.h, colors::ROW_BORDER);
+        let rad = (self.radius() * 0.7).max(2.0);
         self.painter
-            .rect(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0, colors::ROW);
+            .rounded(r.x, r.y, r.w, r.h, rad, colors::ROW_BORDER);
+        self.painter
+            .rounded(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0, rad, colors::ROW);
+    }
+
+    /// Курсор игры рисуем сами: мы отрисовываемся в Present, уже после того
+    /// как игра нарисовала свой, поэтому родной оказывается под панелью.
+    fn draw_cursor(&mut self) {
+        if self.input.x < 0.0 || self.input.y < 0.0 {
+            return;
+        }
+        self.painter
+            .sprite(super::icons::CURSOR_ID, self.input.x, self.input.y);
+    }
+
+    /// Ячейка под иконку — скруглённая рамка, как у хотбара.
+    fn cell(&mut self, r: Rect, border: u32, fill: u32) {
+        let rad = (self.radius() * 0.8).max(3.0);
+        self.painter.rounded(r.x, r.y, r.w, r.h, rad, border);
+        self.painter
+            .rounded(r.x + 2.0, r.y + 2.0, r.w - 4.0, r.h - 4.0, rad, fill);
     }
 
     fn toggle(&mut self, r: Rect, on: bool) -> bool {
         let clicked = self.hit(r);
-        self.painter.rect(r.x, r.y, r.w, r.h, colors::BORDER);
+        let rad = (r.h * 0.5).max(2.0);
+        self.painter
+            .rounded(r.x, r.y, r.w, r.h, rad, colors::BORDER);
         let half = r.w * 0.62;
         if on {
             self.painter
@@ -157,9 +188,11 @@ impl<'a, 'b> Layout<'a, 'b> {
         } else {
             colors::TAB
         };
-        self.painter.rect(r.x, r.y, r.w, r.h, colors::BORDER);
+        let rad = (self.radius() * 0.8).max(3.0);
         self.painter
-            .rect(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0, fill);
+            .rounded(r.x, r.y, r.w, r.h, rad, colors::BORDER);
+        self.painter
+            .rounded(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0, rad, fill);
         self.painter
             .text_centered(r.x, r.y, r.w, r.h, label, colors::TEXT);
         clicked
@@ -206,6 +239,7 @@ pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32
     y += arrow.h + GAP * scale;
 
     if !ui.expanded {
+        layout.draw_cursor();
         return layout.over_ui;
     }
 
@@ -389,24 +423,12 @@ pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32
                 s.dirty = true;
             });
         }
-        layout.painter.rect(
-            cell.x,
-            cell.y,
-            cell.w,
-            cell.h,
-            if on {
-                colors::SLOT_ON_BORDER
-            } else {
-                colors::BORDER
-            },
-        );
-        layout.painter.rect(
-            cell.x + 2.0,
-            cell.y + 2.0,
-            cell.w - 4.0,
-            cell.h - 4.0,
-            if on { colors::SLOT_ON } else { colors::SLOT },
-        );
+        let (border, fill) = if on {
+            (colors::SLOT_ON_BORDER, colors::SLOT_ON)
+        } else {
+            (colors::BORDER, colors::SLOT)
+        };
+        layout.cell(cell, border, fill);
         layout.painter.icon(*item, cell.x, cell.y, cell.w, cell.h);
         slot_x += slot + GAP * scale;
     }
@@ -448,6 +470,7 @@ pub fn build(painter: &mut Painter, ui: &mut UiState, input: Input, screen: (f32
         Tab::None => {}
     }
 
+    layout.draw_cursor();
     layout.over_ui
 }
 
@@ -558,10 +581,7 @@ fn filter_window(layout: &mut Layout, x: f32, y: f32, w: f32, scale: f32) {
             Mark::Deny => colors::MARK_DENY,
             Mark::Neutral => colors::BORDER,
         };
-        layout.painter.rect(r.x, r.y, r.w, r.h, border);
-        layout
-            .painter
-            .rect(r.x + 2.0, r.y + 2.0, r.w - 4.0, r.h - 4.0, colors::SLOT);
+        layout.cell(r, border, colors::SLOT);
         layout.painter.icon(*item, r.x, r.y, r.w, r.h);
     }
 }
