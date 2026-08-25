@@ -1,4 +1,4 @@
-//! Рабочий поток: хоткеи, автомат рыбалки и панель состояния.
+//! Рабочий поток: хоткеи, автомат рыбалки, синхронизация конфига и панели.
 //!
 //! Цикл хоткеев живёт независимо от подключения к игре — иначе неудачный
 //! attach убивал бы поток вместе с возможностью выгрузить DLL.
@@ -13,12 +13,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use crate::config::{Config, FilterMode};
 use crate::fishing::Fishing;
 use crate::game::Game;
+use crate::overlay::state::{self, Mark};
 use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, detour, input, log, overlay};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// Чтение состояния игры заметно дороже опроса клавиш.
 const TICK_INTERVAL: Duration = Duration::from_millis(120);
-const STATUS_INTERVAL: Duration = Duration::from_secs(10);
+const STATUS_INTERVAL: Duration = Duration::from_secs(30);
 /// Игра может быть ещё в сплэше — сборка Terraria появится не сразу.
 const ATTACH_RETRY: Duration = Duration::from_millis(750);
 const ATTACH_ATTEMPTS: u32 = 40;
@@ -50,12 +51,13 @@ pub fn run(dll_dir: PathBuf) {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 
-    let config = Config::load(&dll_dir);
+    let mut config = Config::load(&dll_dir);
+    push_config(&config);
     log!(
-        "конфиг: фильтр={:?}, сундуки={}, снятие троттлинга={}",
+        "конфиг: фильтр={:?}, сундуки={}, автопитьё={}",
         config.filter_mode,
         config.quick_stack_when_full,
-        config.disable_inactive_throttle
+        config.auto_potions
     );
     log!("хоткеи: вверх — панель, вниз — старт/стоп, Delete — выгрузка");
 
@@ -67,17 +69,15 @@ pub fn run(dll_dir: PathBuf) {
     let mut attempts: u32 = 0;
     let mut next_attach = Instant::now();
     let mut gave_up = false;
-    let mut state_line = "ищу игру".to_string();
-    let mut detour_line = "не установлен".to_string();
 
     let mut fishing = Fishing::new();
     let mut last_tick = Instant::now() - TICK_INTERVAL;
-    let mut last_status = Instant::now() - STATUS_INTERVAL;
+    let mut last_status = Instant::now();
+    let started = Instant::now();
 
     if overlay::install() {
         log!("оверлей установлен, панель по стрелке вверх");
     }
-    publish(&config, &fishing, &state_line, &detour_line);
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
         // Хоткеи опрашиваем первыми и всегда: выгрузка должна работать
@@ -103,8 +103,10 @@ pub fn run(dll_dir: PathBuf) {
         }
 
         if key_toggle.pressed() {
-            fishing.toggle();
-            publish(&config, &fishing, &state_line, &detour_line);
+            state::with(|s| {
+                s.auto_fish = !s.auto_fish;
+                s.dirty = true;
+            });
         }
 
         if game.is_none() && !gave_up && Instant::now() >= next_attach {
@@ -113,12 +115,17 @@ pub fn run(dll_dir: PathBuf) {
             match Game::attach(verbose) {
                 Ok(attached) => {
                     log!("подключились к игре с попытки {attempts}");
-                    state_line = match attached.version() {
-                        Some(v) => format!("подключено, {v}"),
-                        None => "подключено".to_string(),
-                    };
+                    let version = attached.version();
+                    state::with(|s| {
+                        s.status.connected = match &version {
+                            Some(v) => format!("подключено, {v}"),
+                            None => "подключено".to_string(),
+                        };
+                    });
                     apply_settings(&attached, &config);
-                    detour_line = install_detour(&attached);
+                    let ready = install_detour(&attached);
+                    state::with(|s| s.status.detour_ready = ready);
+                    load_fishable(&attached);
                     game = Some(attached);
                 }
                 Err(e) => {
@@ -127,7 +134,7 @@ pub fn run(dll_dir: PathBuf) {
                     }
                     if attempts >= ATTACH_ATTEMPTS {
                         gave_up = true;
-                        state_line = "игра не найдена".to_string();
+                        state::with(|s| s.status.connected = "игра не найдена".to_string());
                         log!(
                             "подключиться не удалось за {ATTACH_ATTEMPTS} попыток. \
                              Хоткеи работают, выгрузка по Delete доступна"
@@ -142,7 +149,7 @@ pub fn run(dll_dir: PathBuf) {
             if last_tick.elapsed() >= TICK_INTERVAL {
                 last_tick = Instant::now();
                 fishing.tick(attached, &config);
-                publish(&config, &fishing, &state_line, &detour_line);
+                state::with(|s| s.stats.seconds = started.elapsed().as_secs());
             }
             if last_status.elapsed() >= STATUS_INTERVAL {
                 last_status = Instant::now();
@@ -156,6 +163,12 @@ pub fn run(dll_dir: PathBuf) {
             }
         }
 
+        // Переключатели из UI сохраняем в конфиг.
+        if state::with(|s| std::mem::take(&mut s.dirty)).unwrap_or(false) {
+            pull_config(&mut config);
+            config.save(&dll_dir);
+        }
+
         std::thread::sleep(POLL_INTERVAL);
     }
 
@@ -163,13 +176,70 @@ pub fn run(dll_dir: PathBuf) {
     unsafe { CoUninitialize() };
 }
 
-/// Ставит детур на `Player.ItemCheck` и возвращает строку для панели.
-fn install_detour(game: &Game) -> String {
+/// Конфиг -> общее состояние (при старте).
+fn push_config(config: &Config) {
+    state::with(|s| {
+        s.quick_stack = config.quick_stack_when_full;
+        s.auto_potions = config.auto_potions;
+        s.potions = config.potions;
+        s.whitelist_mode = config.filter_mode == FilterMode::Whitelist;
+        s.filter.clear();
+        for id in &config.whitelist {
+            s.filter.insert(*id, Mark::Allow);
+        }
+        for id in &config.blacklist {
+            s.filter.insert(*id, Mark::Deny);
+        }
+    });
+}
+
+/// Общее состояние -> конфиг (после правок в UI).
+fn pull_config(config: &mut Config) {
+    state::with(|s| {
+        config.quick_stack_when_full = s.quick_stack;
+        config.auto_potions = s.auto_potions;
+        config.potions = s.potions;
+        config.filter_mode = if s.whitelist_mode {
+            FilterMode::Whitelist
+        } else {
+            FilterMode::Blacklist
+        };
+        config.whitelist = s
+            .filter
+            .iter()
+            .filter(|(_, m)| **m == Mark::Allow)
+            .map(|(id, _)| *id)
+            .collect();
+        config.blacklist = s
+            .filter
+            .iter()
+            .filter(|(_, m)| **m == Mark::Deny)
+            .map(|(id, _)| *id)
+            .collect();
+        config.whitelist.sort_unstable();
+        config.blacklist.sort_unstable();
+    });
+}
+
+/// Список ловимого берём у игры и отдаём оверлею под атлас иконок.
+fn load_fishable(game: &Game) {
+    match game.fishable_items() {
+        Ok(items) => {
+            log!("ловится предметов: {}", items.len());
+            overlay::set_icon_items(items.clone());
+            state::with(|s| s.fishable = items);
+        }
+        Err(e) => log!("список ловимого получить не удалось: {e}"),
+    }
+}
+
+/// Ставит детур на `Player.ItemCheck`.
+fn install_detour(game: &Game) -> bool {
     let address = match game.item_check_address() {
         Ok(a) => a,
         Err(e) => {
             log!("детур ItemCheck: адрес получить не удалось: {e}");
-            return "адрес не получен".to_string();
+            return false;
         }
     };
     log!("детур ItemCheck: адрес 0x{address:08X}");
@@ -177,9 +247,9 @@ fn install_detour(game: &Game) -> String {
 
     if detour::install(address) {
         log!("детур ItemCheck установлен");
-        "установлен".to_string()
+        true
     } else {
-        "не встал".to_string()
+        false
     }
 }
 
@@ -195,34 +265,4 @@ fn apply_settings(game: &Game, config: &Config) {
         },
         Err(e) => log!("не удалось снять троттлинг: {e}"),
     }
-}
-
-fn publish(config: &Config, fishing: &Fishing, state: &str, detour_line: &str) {
-    let filter = match config.filter_mode {
-        FilterMode::Blacklist => format!("чёрный список ({})", config.blacklist.len()),
-        FilterMode::Whitelist => format!("белый список ({})", config.whitelist.len()),
-    };
-    let pair = |label: &str, value: String| (label.to_string(), value);
-    overlay::set_lines(vec![
-        pair("состояние", state.to_string()),
-        pair("детур", detour_line.to_string()),
-        pair("рыбалка", fishing.status()),
-        pair("фильтр", filter),
-        pair(
-            "сундуки",
-            if config.quick_stack_when_full {
-                "разложить при заполнении"
-            } else {
-                "не трогать"
-            }
-            .to_string(),
-        ),
-        pair("поплавок", fishing.bobber_line.clone()),
-        pair("запасы", fishing.stock_line.clone()),
-        (String::new(), String::new()),
-        (
-            String::new(),
-            "вверх — панель, вниз — старт/стоп, Delete — выгрузка".to_string(),
-        ),
-    ]);
 }

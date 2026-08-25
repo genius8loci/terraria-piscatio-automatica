@@ -153,6 +153,61 @@ struct Page {
     kerning: Vec<[f32; 3]>,
 }
 
+/// Готовая к загрузке в текстуру картинка.
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u32>,
+}
+
+/// Читает XNB, у которого корневой объект — `Texture2D`.
+/// Такими лежат иконки предметов: `Content/Images/Item_<id>.xnb`.
+pub fn load_texture(path: &Path) -> Option<Image> {
+    let raw = std::fs::read(path).ok()?;
+    let body = decompress(&raw)?;
+    let mut r = Reader::new(&body);
+
+    let readers = r.varint()?;
+    for _ in 0..readers {
+        let _name = r.string()?;
+        let _version = r.i32()?;
+    }
+    let _shared = r.varint()?;
+    let _root = r.varint()?;
+
+    let format = r.i32()?;
+    let width = r.u32()?;
+    let height = r.u32()?;
+    let mip_count = r.u32()?;
+    if mip_count == 0 || width == 0 || height == 0 || width > 4096 || height > 4096 {
+        return None;
+    }
+    let size = r.u32()? as usize;
+    let data = r.take(size)?;
+    let pixels = decode_surface(format, width, height, data)?;
+    Some(Image {
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// Формат поверхности XNB — для диагностики.
+#[allow(dead_code)]
+pub fn texture_format(path: &Path) -> Option<(i32, u32, u32)> {
+    let raw = std::fs::read(path).ok()?;
+    let body = decompress(&raw)?;
+    let mut r = Reader::new(&body);
+    let readers = r.varint()?;
+    for _ in 0..readers {
+        let _name = r.string()?;
+        let _version = r.i32()?;
+    }
+    let _shared = r.varint()?;
+    let _root = r.varint()?;
+    Some((r.i32()?, r.u32()?, r.u32()?))
+}
+
 pub fn load(path: &Path, wanted: &[char]) -> Option<GameFont> {
     let raw = std::fs::read(path).ok()?;
     let body = decompress(&raw)?;

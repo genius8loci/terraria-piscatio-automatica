@@ -48,8 +48,10 @@ pub struct Config {
     pub jitter_min_ms: u64,
     pub jitter_max_ms: u64,
 
-    /// Автопитьё зелий. Реализация запланирована последней.
+    /// Автопитьё зелий.
     pub auto_potions: bool,
+    /// Какие из трёх зелий пить: Fishing / Sonar / Crate.
+    pub potions: [bool; 3],
 
     /// Виртуальные коды клавиш. По умолчанию Insert / End / Delete.
     pub hotkey_ui: u16,
@@ -69,6 +71,7 @@ impl Default for Config {
             jitter_min_ms: 120,
             jitter_max_ms: 480,
             auto_potions: false,
+            potions: [true, false, true],
             hotkey_ui: 0x26,     // VK_UP
             hotkey_toggle: 0x28, // VK_DOWN
             hotkey_unload: 0x2E, // VK_DELETE
@@ -77,21 +80,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Решает, подсекать ли улов. `rolled` — это Projectile.localAI[1]:
-    /// положительное значение — item id, отрицательное — минус id NPC.
-    pub fn should_pull(&self, rolled: i32) -> bool {
-        if rolled == 0 {
-            return false;
-        }
-        if rolled < 0 {
-            return self.pull_enemy_spawns;
-        }
-        match self.filter_mode {
-            FilterMode::Blacklist => !self.blacklist.contains(&rolled),
-            FilterMode::Whitelist => self.whitelist.contains(&rolled),
-        }
-    }
-
     pub fn load(dir: &PathBuf) -> Self {
         let path = dir.join("piscatio.toml");
         match std::fs::read_to_string(&path) {

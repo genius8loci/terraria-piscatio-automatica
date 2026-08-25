@@ -45,6 +45,12 @@ const CLSID_COR_RUNTIME_HOST: GUID = GUID::from_u128(0xcb2f6723_ab3a_11d2_9c40_0
 const IID_COR_RUNTIME_HOST: GUID = GUID::from_u128(0xcb2f6722_ab3a_11d2_9c40_00c04fa30a3e);
 
 const IID_APP_DOMAIN: GUID = GUID::from_u128(0x05f696dc_2b29_3663_ad8b_c4389cf2a713);
+/// `_Type` из mscorlib.tlb — нужен, когда тип получен как обычный объект.
+const IID_TYPE: GUID = GUID::from_u128(0xbca8b44d_aad6_3a86_8ab7_03349f4f2da2);
+
+/// BindingFlags из System.Reflection.
+pub const BINDING_INSTANCE: i32 = 4;
+pub const BINDING_NON_PUBLIC: i32 = 32;
 
 // Номера слотов vtable, снятые из mscorlib.tlb
 // (Windows\Microsoft.NET\Framework\v4.0.30319\mscorlib.tlb).
@@ -53,6 +59,7 @@ const SLOT_APPDOMAIN_LOAD_2: usize = 44; // Load_2(BSTR, _Assembly**)
 const SLOT_APPDOMAIN_GET_ASSEMBLIES: usize = 57; // GetAssemblies(SAFEARRAY**)
 const SLOT_ASSEMBLY_GET_FULLNAME: usize = 15; // get_FullName(BSTR*)
 const SLOT_ASSEMBLY_GETTYPE_2: usize = 17; // GetType_2(BSTR, _Type**)
+const SLOT_TYPE_GETFIELD: usize = 47; // GetField(BSTR, BindingFlags, _FieldInfo**)
 const SLOT_TYPE_GETMETHOD_6: usize = 66; // GetMethod_6(BSTR, _MethodInfo**)
 const SLOT_TYPE_GETFIELD_2: usize = 68; // GetField_2(BSTR, _FieldInfo**)
 const SLOT_FIELDINFO_GETVALUE: usize = 19; // GetValue(VARIANT, VARIANT*)
@@ -66,6 +73,8 @@ type FnVariantOutVariant = unsafe extern "system" fn(*mut c_void, VARIANT, *mut 
 type FnVariantVariant = unsafe extern "system" fn(*mut c_void, VARIANT, VARIANT) -> HRESULT;
 type FnInvoke3 =
     unsafe extern "system" fn(*mut c_void, VARIANT, *mut SAFEARRAY, *mut VARIANT) -> HRESULT;
+type FnBstrFlagsOutPtr =
+    unsafe extern "system" fn(*mut c_void, *mut u16, i32, *mut *mut c_void) -> HRESULT;
 
 pub fn err(msg: &str) -> windows::core::Error {
     windows::core::Error::new(windows::Win32::Foundation::E_FAIL, msg)
@@ -117,6 +126,35 @@ fn build(vt: VARENUM, payload: VARIANT_0_0_0) -> VARIANT {
 impl Var {
     fn from_raw(v: VARIANT) -> Self {
         Var(v)
+    }
+
+    /// Managed-объект внутри VARIANT.
+    pub fn as_unknown(&self) -> Option<IUnknown> {
+        unsafe {
+            let a = &self.0.Anonymous.Anonymous;
+            if a.vt == VT_UNKNOWN {
+                return (*a.Anonymous.punkVal).clone();
+            }
+            if a.vt == VT_DISPATCH {
+                let dispatch = (*a.Anonymous.pdispVal).as_ref()?;
+                return dispatch.cast::<IUnknown>().ok();
+            }
+            None
+        }
+    }
+
+    /// Приводит значение к `_Type`. Нужно, когда тип пришёл как обычный
+    /// объект — например из `Object.GetType()`.
+    pub fn as_type(&self) -> Option<Type> {
+        let unknown = self.as_unknown()?;
+        unsafe {
+            let mut out: *mut c_void = ptr::null_mut();
+            unknown.query(&IID_TYPE, &mut out).ok().ok()?;
+            if out.is_null() {
+                return None;
+            }
+            Some(Type(IUnknown::from_raw(out)))
+        }
     }
 
     pub fn null() -> Self {
@@ -389,6 +427,24 @@ impl Type {
             let bstr = BSTR::from(name);
             let mut out: *mut c_void = ptr::null_mut();
             f(this(&self.0), bstr.as_ptr() as *mut u16, &mut out).ok()?;
+            if out.is_null() {
+                return Err(err("поле не найдено"));
+            }
+            Ok(Field {
+                info: IUnknown::from_raw(out),
+                name,
+            })
+        }
+    }
+
+    /// `Type.GetField(String, BindingFlags)` — для непубличных полей,
+    /// до которых обычный `GetField(String)` не достаёт.
+    pub fn field_flags(&self, name: &'static str, flags: i32) -> Result<Field> {
+        unsafe {
+            let f: FnBstrFlagsOutPtr = vfn(&self.0, SLOT_TYPE_GETFIELD);
+            let bstr = BSTR::from(name);
+            let mut out: *mut c_void = ptr::null_mut();
+            f(this(&self.0), bstr.as_ptr() as *mut u16, flags, &mut out).ok()?;
             if out.is_null() {
                 return Err(err("поле не найдено"));
             }

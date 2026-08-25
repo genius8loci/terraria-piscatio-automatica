@@ -5,19 +5,28 @@
 
 use windows::core::Result;
 
-use crate::clr::{Clr, Field, Method, Var, array_get};
+use crate::clr::{
+    BINDING_INSTANCE, BINDING_NON_PUBLIC, Clr, Field, Method, Type, Var, array_get, array_len, err,
+};
 
 /// Размер `Main.projectile` в 1.4.5.6.
 const MAX_PROJECTILES: i32 = 1001;
 /// Размер `Player.inventory` — 59; слоты 0..49 это основная сетка.
 const INVENTORY_MAIN_SLOTS: i32 = 50;
+/// `Player.maxBuffs` в 1.4.5.8.
+const MAX_BUFFS: i32 = 44;
+
+/// Зелья рыбалки: id предмета и id баффа (из ItemID / BuffID).
+pub const POTIONS: [(i32, i32, &str); 3] = [
+    (2354, 121, "Fishing"),
+    (2355, 122, "Sonar"),
+    (2356, 123, "Crate"),
+];
 
 /// Снимок состояния поплавка.
 #[derive(Debug, Clone, Copy)]
 pub struct Bobber {
     pub index: i32,
-    /// `ai[0]`: 0 — работает, >= 1 — подтягивается к игроку.
-    pub ai0: f32,
     /// `ai[1]`: 0 — простой, < 0 — активная поклёвка (окно подсечки).
     pub ai1: f32,
     /// `localAI[1]`: при поклёвке — id предмета (> 0) либо минус id NPC (< 0).
@@ -35,11 +44,6 @@ impl Bobber {
     pub fn rolled(&self) -> i32 {
         self.local_ai1 as i32
     }
-
-    /// Поплавок уже тянется к игроку — новый заброс невозможен.
-    pub fn is_reeling(&self) -> bool {
-        self.ai0 >= 1.0
-    }
 }
 
 pub struct Game {
@@ -52,6 +56,7 @@ pub struct Game {
     f_version: Option<Field>,
     f_mouse_x: Field,
     f_mouse_y: Field,
+    f_fish_drops: Field,
 
     /// Для получения адреса JIT-кода `Player.ItemCheck`.
     m_item_check: Method,
@@ -66,11 +71,16 @@ pub struct Game {
 
     pl_inventory: Field,
     pl_control_use_item: Field,
+    pl_buff_type: Field,
     pl_quick_stack: Method,
+    pl_add_buff: Method,
+
+    m_object_get_type: Method,
 
     it_type: Field,
     it_stack: Field,
     it_bait: Field,
+    it_buff_time: Field,
 }
 
 impl Game {
@@ -93,10 +103,12 @@ impl Game {
         let mscorlib = clr.assembly("mscorlib", false)?;
         let method_base = mscorlib.get_type("System.Reflection.MethodBase")?;
         let method_handle = mscorlib.get_type("System.RuntimeMethodHandle")?;
+        let object_type = mscorlib.get_type("System.Object")?;
 
         let game = Game {
             f_mouse_x: main.field("mouseX")?,
             f_mouse_y: main.field("mouseY")?,
+            f_fish_drops: main.field("FishDropsDB")?,
             m_item_check: player.method("ItemCheck")?,
             m_get_method_handle: method_base.method("get_MethodHandle")?,
             m_get_function_pointer: method_handle.method("GetFunctionPointer")?,
@@ -115,11 +127,16 @@ impl Game {
 
             pl_inventory: player.field("inventory")?,
             pl_control_use_item: player.field("controlUseItem")?,
+            pl_buff_type: player.field("buffType")?,
             pl_quick_stack: player.method("QuickStackAllChests")?,
+            pl_add_buff: player.method("AddBuff")?,
+
+            m_object_get_type: object_type.method("GetType")?,
 
             it_type: item.field("type")?,
             it_stack: item.field("stack")?,
             it_bait: item.field("bait")?,
+            it_buff_time: item.field("buffTime")?,
 
             _clr: clr,
         };
@@ -179,6 +196,111 @@ impl Game {
             .ok_or_else(|| crate::clr::err("GetFunctionPointer вернул не указатель"))
     }
 
+    /// Тип объекта в рантайме — через `Object.GetType()`.
+    fn type_of(&self, value: &Var) -> Result<Type> {
+        self.m_object_get_type
+            .invoke(value, &[])?
+            .as_type()
+            .ok_or_else(|| err("GetType вернул не тип"))
+    }
+
+    /// Полный список предметов, которые вообще можно выловить.
+    ///
+    /// Берётся из самой игры: `Main.FishDropsDB` — это `FishDropRuleList`
+    /// с приватным `List<FishDropRule>`, а у каждого правила есть
+    /// `public int[] PossibleItems`. Никаких зашитых списков.
+    pub fn fishable_items(&self) -> Result<Vec<i32>> {
+        let db = self.f_fish_drops.get_static()?;
+        if db.is_null() {
+            return Err(err("Main.FishDropsDB ещё не заполнен"));
+        }
+        let rules_field = self
+            .type_of(&db)?
+            .field_flags("_rules", BINDING_NON_PUBLIC | BINDING_INSTANCE)?;
+        let list = rules_field.get(&db)?;
+        let array = self.type_of(&list)?.method("ToArray")?.invoke(&list, &[])?;
+
+        let count = array_len(&array)?;
+        let mut items: Vec<i32> = Vec::new();
+        let mut possible: Option<Field> = None;
+
+        for i in 0..count {
+            let rule = array_get(&array, i)?;
+            if rule.is_null() {
+                continue;
+            }
+            if possible.is_none() {
+                possible = Some(self.type_of(&rule)?.field("PossibleItems")?);
+            }
+            let Some(field) = possible.as_ref() else {
+                continue;
+            };
+            let ids = field.get(&rule)?;
+            if ids.is_null() {
+                continue;
+            }
+            let n = array_len(&ids).unwrap_or(0);
+            for j in 0..n {
+                if let Some(id) = array_get(&ids, j)?.as_int() {
+                    if id > 0 && !items.contains(&id) {
+                        items.push(id);
+                    }
+                }
+            }
+        }
+        items.sort_unstable();
+        Ok(items)
+    }
+
+    pub fn has_buff(&self, player: &Var, buff: i32) -> Result<bool> {
+        let buffs = self.pl_buff_type.get(player)?;
+        for i in 0..MAX_BUFFS {
+            if array_get(&buffs, i)?.as_int().unwrap_or(0) == buff {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Слот инвентаря с предметом нужного типа и ненулевым стаком.
+    pub fn find_item(&self, player: &Var, item_type: i32) -> Result<Option<i32>> {
+        let inventory = self.pl_inventory.get(player)?;
+        for i in 0..INVENTORY_MAIN_SLOTS {
+            let item = array_get(&inventory, i)?;
+            if item.is_null() {
+                continue;
+            }
+            if self.it_type.get(&item)?.as_int().unwrap_or(0) != item_type {
+                continue;
+            }
+            if self.it_stack.get(&item)?.as_int().unwrap_or(0) > 0 {
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Выпить зелье из слота: вешаем бафф на его штатную длительность
+    /// и тратим одну штуку.
+    pub fn drink(&self, player: &Var, slot: i32, buff: i32) -> Result<()> {
+        let inventory = self.pl_inventory.get(player)?;
+        let item = array_get(&inventory, slot)?;
+        if item.is_null() {
+            return Err(err("слот пуст"));
+        }
+        let duration = self.it_buff_time.get(&item)?.as_int().unwrap_or(0);
+        if duration <= 0 {
+            return Err(err("у предмета нет длительности баффа"));
+        }
+        self.pl_add_buff.invoke(
+            player,
+            &[Var::int(buff), Var::int(duration), Var::boolean(false)],
+        )?;
+        let stack = self.it_stack.get(&item)?.as_int().unwrap_or(0);
+        self.it_stack.set(&item, Var::int(stack - 1))?;
+        Ok(())
+    }
+
     pub fn version(&self) -> Option<String> {
         self.f_version.as_ref()?.get_static().ok()?.as_string()
     }
@@ -235,7 +357,6 @@ impl Game {
 
             Ok(Some(Bobber {
                 index: i,
-                ai0: array_get(&ai, 0)?.as_float().unwrap_or(0.0),
                 ai1: array_get(&ai, 1)?.as_float().unwrap_or(0.0),
                 local_ai1: array_get(&local_ai, 1)?.as_float().unwrap_or(0.0),
             }))

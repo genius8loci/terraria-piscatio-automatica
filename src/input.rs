@@ -39,7 +39,21 @@ struct Handles {
     players: Field,
     mouse_x: Field,
     mouse_y: Field,
+    mouse_left: Field,
     control_use_item: Field,
+    mouse_interface: Field,
+}
+
+impl Handles {
+    fn local_player(&self) -> Option<Var> {
+        let index = self.my_player.get_static().ok()?.as_int()?;
+        if index < 0 {
+            return None;
+        }
+        let players = self.players.get_static().ok()?;
+        let player = array_get(&players, index).ok()?;
+        (!player.is_null()).then_some(player)
+    }
 }
 
 /// Ячейка, к которой обращается только игровой поток.
@@ -70,22 +84,10 @@ pub fn on_item_check(_this: *mut c_void) {
         return;
     }
 
-    let handles = unsafe { &mut *HANDLES.0.get() };
-    if handles.is_none() {
-        match attach() {
-            Some(ready) => {
-                crate::log!("ввод: хэндлы рефлексии подняты на игровом потоке");
-                *handles = Some(ready);
-            }
-            None => {
-                FAILURES.fetch_add(1, Ordering::Relaxed);
-                COMMAND.store(CMD_NONE, Ordering::Release);
-                crate::log!("ввод: поднять хэндлы не удалось, команда отменена");
-                return;
-            }
-        }
-    }
-    let Some(handles) = handles.as_ref() else {
+    let Some(handles) = handles() else {
+        FAILURES.fetch_add(1, Ordering::Relaxed);
+        COMMAND.store(CMD_NONE, Ordering::Release);
+        crate::log!("ввод: поднять хэндлы не удалось, команда отменена");
         return;
     };
 
@@ -149,7 +151,9 @@ fn attach() -> Option<Handles> {
         players: main.field("player").ok()?,
         mouse_x: main.field("mouseX").ok()?,
         mouse_y: main.field("mouseY").ok()?,
+        mouse_left: main.field("mouseLeft").ok()?,
         control_use_item: player.field("controlUseItem").ok()?,
+        mouse_interface: player.field("mouseInterface").ok()?,
         _clr: clr,
     })
 }
@@ -178,4 +182,44 @@ pub fn busy() -> bool {
 pub fn cancel() {
     COMMAND.store(CMD_NONE, Ordering::Release);
     FAILURES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Хэндлы для игрового потока; поднимаются лениво при первом обращении.
+fn handles() -> Option<&'static Handles> {
+    let slot = unsafe { &mut *HANDLES.0.get() };
+    if slot.is_none() {
+        *slot = attach();
+        if slot.is_some() {
+            crate::log!("ввод: хэндлы рефлексии подняты на игровом потоке");
+        }
+    }
+    slot.as_ref()
+}
+
+/// Курсор и левая кнопка глазами игры.
+///
+/// Звать только с игрового потока: хук Present и детур ItemCheck идут
+/// по одному и тому же потоку, так что общие хэндлы безопасны.
+pub fn cursor() -> Option<(i32, i32, bool)> {
+    let handles = handles()?;
+    let x = handles.mouse_x.get_static().ok()?.as_int()?;
+    let y = handles.mouse_y.get_static().ok()?.as_int()?;
+    let down = handles
+        .mouse_left
+        .get_static()
+        .ok()?
+        .as_bool()
+        .unwrap_or(false);
+    Some((x, y, down))
+}
+
+/// Курсор над нашим окном — сообщаем игре, чтобы клик не ушёл в мир.
+pub fn set_mouse_interface(over: bool) {
+    let Some(handles) = handles() else {
+        return;
+    };
+    let Some(player) = handles.local_player() else {
+        return;
+    };
+    let _ = handles.mouse_interface.set(&player, Var::boolean(over));
 }
