@@ -38,6 +38,11 @@ pub struct Fishing {
     last_potion: Instant,
     warned_no_detour: bool,
 
+    /// Когда включили рыбалку — от этого мгновения идёт время в статистике.
+    /// Пока выключена, показываем последнее набежавшее, а новый запуск
+    /// начинает счёт заново.
+    session_start: Option<Instant>,
+    session_seconds: u64,
     /// Когда поплавок ушёл в воду — от этого мгновения меряем поклёвку.
     cast_at: Option<Instant>,
     /// Сумма и число замеров: среднее считаем по ним, а не по последнему.
@@ -63,6 +68,8 @@ impl Fishing {
             last_stock: Instant::now() - STOCK_INTERVAL,
             last_potion: Instant::now() - POTION_INTERVAL,
             warned_no_detour: false,
+            session_start: None,
+            session_seconds: 0,
             cast_at: None,
             bite_total: 0.0,
             bite_count: 0,
@@ -75,6 +82,22 @@ impl Fishing {
 
     fn enabled(&self) -> bool {
         state::with(|s| s.auto_fish).unwrap_or(false)
+    }
+
+    /// Ведёт время рыбалки: счёт идёт от включения, а не от инжекта.
+    /// Выключили — время замирает на последнем значении; включили снова —
+    /// начинается заново.
+    fn track_session(&mut self) {
+        let enabled = self.enabled();
+        match (enabled, self.session_start) {
+            (true, None) => {
+                self.session_start = Some(Instant::now());
+                self.session_seconds = 0;
+            }
+            (true, Some(start)) => self.session_seconds = start.elapsed().as_secs(),
+            (false, Some(_)) => self.session_start = None,
+            (false, None) => {}
+        }
     }
 
     /// Строка состояния для лога и панели.
@@ -143,6 +166,7 @@ impl Fishing {
 
     pub fn tick(&mut self, game: &Game, config: &Config) {
         self.drop_stale_click();
+        self.track_session();
 
         if self.last_stock.elapsed() >= STOCK_INTERVAL {
             self.last_stock = Instant::now();
@@ -184,6 +208,7 @@ impl Fishing {
         };
         state::with(|s| {
             s.status.fishing = status;
+            s.stats.seconds = self.session_seconds;
             s.stats.caught = self.pulls;
             s.stats.skipped = self.skips;
             s.stats.crates = self.crates;

@@ -47,6 +47,11 @@ pub const SLOT_HOVER: i32 = -13;
 pub const CROSS: i32 = -14;
 pub const SEARCH: i32 = -15;
 pub const SEARCH_CANCEL: i32 = -16;
+/// Уголки на кнопке сворачивания. Стрелок в шрифте игры нет, а готовой
+/// картинки в `UI/` не нашлось, поэтому рисуем сами — ступеньками по
+/// пикселям, как рисует свою графику игра.
+pub const CHEVRON_UP: i32 = -17;
+pub const CHEVRON_DOWN: i32 = -18;
 
 /// Ширина рамки при девятичастной нарезке, в пикселях исходной текстуры.
 /// Для панели это раскладка самой игры: 12 + 4 + 12 = 28.
@@ -106,6 +111,8 @@ pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
 
     loaded.push((WHITE, white_block()));
     loaded.push((CROSS, cross_block()));
+    loaded.push((CHEVRON_UP, chevron_block(true)));
+    loaded.push((CHEVRON_DOWN, chevron_block(false)));
     for (id, name, cut) in UI_ASSETS {
         let path = content.join(format!("{name}.xnb"));
         let Some(image) = xnb::load_texture(&path) else {
@@ -214,6 +221,48 @@ fn white_block() -> xnb::Image {
         width: 4,
         height: 4,
         pixels: vec![0xFFFF_FFFF; 16],
+    }
+}
+
+/// Уголок «раскрыть / свернуть»: ступеньки по два пикселя, как в графике
+/// игры. Картинка квадратная и симметричная, поэтому центрируется просто
+/// по своим границам, без подгонок на глаз.
+fn chevron_block(up: bool) -> xnb::Image {
+    const SIZE: u32 = 16;
+    /// Толщина штриха и ширина ступеньки — в пикселях картинки.
+    const THICK: u32 = 3;
+    const STEP: u32 = 2;
+
+    let mut pixels = vec![0u32; (SIZE * SIZE) as usize];
+    let arms = SIZE / (STEP * 2);
+    // Уголок ставим так, чтобы он занял середину квадрата по высоте.
+    let base = (SIZE - arms * STEP - THICK) / 2;
+    for arm in 0..arms {
+        let row = base + arm * STEP;
+        let row = if up { SIZE - row - THICK } else { row };
+        let left = arm * STEP;
+        let right = SIZE - (arm + 1) * STEP;
+        for y in row..(row + THICK).min(SIZE) {
+            for x in left..(left + STEP).min(SIZE) {
+                pixels[(y * SIZE + x) as usize] = 0xFFFF_FFFF;
+            }
+            for x in right..(right + STEP).min(SIZE) {
+                pixels[(y * SIZE + x) as usize] = 0xFFFF_FFFF;
+            }
+        }
+    }
+    // Смыкаем половинки на острие.
+    let tip = base + arms * STEP;
+    let tip = if up { SIZE - tip - THICK } else { tip };
+    for y in tip..(tip + THICK).min(SIZE) {
+        for x in (arms * STEP)..(SIZE - arms * STEP) {
+            pixels[(y * SIZE + x) as usize] = 0xFFFF_FFFF;
+        }
+    }
+    xnb::Image {
+        width: SIZE,
+        height: SIZE,
+        pixels,
     }
 }
 

@@ -29,11 +29,22 @@ const TITLE: &str = concat!(
 /// Насколько панель плотнее родного интерфейса игры.
 const DENSITY: f32 = 0.9;
 
+/// Подписи строк — по самой длинной из них считается ширина панели.
+const LABELS: &[&str] = &[
+    "Авторыбалка",
+    "Сундуки разложить при заполнении",
+    "Подсекать врагов (Герцог Рыброн)",
+    "Поплавок",
+    "Свободные ячейки",
+    "Автопитьё зелий",
+    "Зелья для автоиспользования:",
+];
+
 /// Базовые размеры при масштабе 1.0; всё остальное — умножением.
 const ROW_H: f32 = 34.0;
-/// Ширина по самой длинной строке внутри. Заголовок собирается из
-/// `Cargo.toml` и может оказаться длиннее — тогда панель раздвинется.
-const PANEL_W: f32 = 600.0;
+/// Нижний предел ширины: панель уже этого выглядит обрубком, даже если
+/// весь текст в неё влез.
+const PANEL_MIN_W: f32 = 380.0;
 const PAD: f32 = 12.0;
 const GAP: f32 = 6.0;
 const ARROW_W: f32 = 64.0;
@@ -42,6 +53,8 @@ const ARROW_H: f32 = 26.0;
 const TOGGLE: f32 = 14.0;
 /// Доля ячейки под крестик «пропускаю».
 const CROSS_SIZE: f32 = 0.7;
+/// Сторона уголка на кнопке сворачивания.
+const CHEVRON: f32 = 16.0;
 /// Поле от нижнего края экрана, ниже которого окно фильтра не растёт.
 const SCREEN_MARGIN: f32 = 24.0;
 const BAR_W: f32 = 20.0;
@@ -336,12 +349,17 @@ pub fn build(
         hover_item: 0,
     };
 
-    // Заголовок собирается из `Cargo.toml` и заранее неизвестной длины,
-    // поэтому панель раздвигается под него, а не наоборот. Шире экрана
-    // при этом не становится.
-    let title_w = layout.painter.measure(TITLE) + (PAD * 2.0 * scale).round();
-    let panel_w = (PANEL_W * scale)
-        .max(title_w)
+    // Ширину задаёт содержимое: самая длинная подпись или заголовок из
+    // `Cargo.toml`, чей размер заранее неизвестен. Шире экрана при этом
+    // панель не становится.
+    let pad2 = (PAD * 2.0 * scale).round();
+    let toggle_gap = (TOGGLE + PAD) * scale;
+    let longest = LABELS
+        .iter()
+        .map(|label| layout.painter.measure(label) + toggle_gap)
+        .fold(layout.painter.measure(TITLE), f32::max);
+    let panel_w = (longest + pad2)
+        .max(PANEL_MIN_W * scale)
         .min(screen.0 - (SCREEN_MARGIN * 2.0 * scale))
         .round();
     let x = ((screen.0 - panel_w) * 0.5).floor();
@@ -357,12 +375,19 @@ pub fn build(
     if layout.button(arrow, "", false) {
         ui.expanded = !ui.expanded;
     }
-    // Шрифт игры не содержит стрелок — рисуем треугольник сами.
-    layout.painter.triangle(
-        arrow.x + arrow.w * 0.5,
-        arrow.y + arrow.h * 0.5,
-        7.0 * scale,
-        ui.expanded,
+    // Стрелок в шрифте игры нет, поэтому уголок лежит в атласе своей
+    // картинкой — пиксельной, как остальная графика.
+    let chevron = (CHEVRON * scale).round();
+    layout.painter.stretch(
+        if ui.expanded {
+            icons::CHEVRON_UP
+        } else {
+            icons::CHEVRON_DOWN
+        },
+        (arrow.x + (arrow.w - chevron) * 0.5).round(),
+        (arrow.y + (arrow.h - chevron) * 0.5).round(),
+        chevron,
+        chevron,
         colors::TEXT,
     );
     y += arrow.h + GAP * scale;

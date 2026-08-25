@@ -401,8 +401,11 @@ pub fn edit_text(current: &str) -> Option<String> {
     if !instance.is_null() {
         let _ = api.handle_ime.invoke(&instance, &[]);
     }
+    // Второй аргумент обязателен, хотя у метода он со значением по умолчанию:
+    // рефлексия значения по умолчанию не подставляет и на нехватке аргументов
+    // бросает `TargetParameterCountException`.
     api.get_input
-        .invoke(&Var::null(), &[Var::text(current)])
+        .invoke(&Var::null(), &[Var::text(current), Var::boolean(false)])
         .ok()?
         .as_string()
 }

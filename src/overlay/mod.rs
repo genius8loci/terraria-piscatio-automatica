@@ -827,23 +827,6 @@ impl<'a> Painter<'a> {
         );
     }
 
-    /// Треугольник рисуем горизонтальными полосками: в шрифте игры
-    /// стрелок нет, а квады у нас всё равно единственный примитив.
-    pub fn triangle(&mut self, cx: f32, cy: f32, size: f32, up: bool, color: u32) {
-        let steps = size.max(2.0) as i32;
-        let step_h = size / steps as f32 + 1.0;
-        for i in 0..steps {
-            let t = i as f32 / steps as f32;
-            let half = size * (1.0 - t);
-            let dy = if up {
-                -size * 0.5 + t * size
-            } else {
-                size * 0.5 - t * size
-            };
-            self.rect(cx - half, cy + dy, half * 2.0, step_h, color);
-        }
-    }
-
     /// Строка с чёрной обводкой — так игра рисует весь свой текст
     /// (`ChatManager.DrawColorCodedStringWithShadow`): четыре чёрных прохода
     /// со сдвигом по осям и цветной поверх. Без обводки шрифт тот же самый,
@@ -1126,6 +1109,27 @@ fn pump_search_text() {
 /// Идёт набор в строке поиска: хоткеи трогать нельзя.
 pub fn is_typing() -> bool {
     TYPING.load(Ordering::Relaxed)
+}
+
+/// Раскрывает или сворачивает панель — то же, что клик по стрелке.
+/// Сама стрелка при этом остаётся на месте.
+pub fn toggle_expanded() {
+    let Ok(mut guard) = UI.lock() else {
+        return;
+    };
+    let state = guard.get_or_insert_with(ui::UiState::default);
+    state.expanded = !state.expanded;
+    if !state.expanded {
+        state.search_focus = false;
+    }
+    crate::log!(
+        "панель {}",
+        if state.expanded {
+            "раскрыта"
+        } else {
+            "свёрнута"
+        }
+    );
 }
 
 /// Отрисовка под `catch_unwind`: паника внутри чужого кадра убьёт игру.

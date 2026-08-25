@@ -8,7 +8,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use crate::config::{Config, FilterMode};
 use crate::fishing::Fishing;
@@ -38,11 +40,31 @@ impl KeyEdge {
         }
     }
 
-    fn pressed(&mut self) -> bool {
+    /// Нажатие по фронту. `active` — окно игры сейчас впереди; если нет,
+    /// фронт всё равно снимается, но наружу не отдаётся: иначе после
+    /// возвращения в игру сработало бы разом всё, что нажималось мимо.
+    fn pressed(&mut self, active: bool) -> bool {
         let down = unsafe { GetAsyncKeyState(self.vk) as u16 & 0x8000 != 0 };
         let edge = down && !self.was_down;
         self.was_down = down;
-        edge
+        edge && active
+    }
+}
+
+/// Окно игры сейчас впереди.
+///
+/// `GetAsyncKeyState` слышит клавиатуру всегда, хоть в браузере, хоть при
+/// свёрнутой игре. Без этой проверки набранное в другом окне долетало до
+/// хоткеев: стрелки дёргали панель, а `Delete` выгружал DLL.
+fn game_focused() -> bool {
+    unsafe {
+        let window = GetForegroundWindow();
+        if window.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(window, Some(&mut pid));
+        pid != 0 && pid == GetCurrentProcessId()
     }
 }
 
@@ -73,48 +95,32 @@ pub fn run(dll_dir: PathBuf) {
     let mut fishing = Fishing::new();
     let mut last_tick = Instant::now() - TICK_INTERVAL;
     let mut last_status = Instant::now();
-    let started = Instant::now();
 
+    // Стрелка сворачивания видна с самого начала: без неё панель нечем
+    // открыть мышью, а хоткей знает не всякий.
+    SHOW_UI.store(true, Ordering::Relaxed);
     if overlay::install() {
-        log!("оверлей установлен, панель по стрелке вверх");
+        log!("оверлей установлен, стрелка вверх раскрывает и сворачивает панель");
     }
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
-        // Пока курсор стоит в строке поиска, клавиши принадлежат ей.
-        // Иначе Delete посреди набора выгрузил бы DLL. Фронт нажатия при
-        // этом всё равно снимаем, чтобы после набора не сработало разом.
-        let typing = overlay::is_typing();
-        if typing {
-            key_unload.pressed();
-            key_ui.pressed();
-            key_toggle.pressed();
-            std::thread::sleep(POLL_INTERVAL);
-            continue;
-        }
+        // Хоткеи слушаем только когда игра впереди и когда не идёт набор
+        // в строке поиска. Фронт нажатия снимаем в любом случае, иначе
+        // после возвращения в игру сработало бы разом всё нажатое мимо.
+        let active = game_focused() && !overlay::is_typing();
 
-        // Хоткеи опрашиваем первыми и всегда: выгрузка должна работать
-        // даже когда подключиться к игре не удалось.
-        if key_unload.pressed() {
+        if key_unload.pressed(active) {
             log!("запрошена выгрузка");
             UNLOAD_REQUESTED.store(true, Ordering::Relaxed);
             SHUTDOWN.store(true, Ordering::Relaxed);
             break;
         }
 
-        if key_ui.pressed() {
-            let shown = !SHOW_UI.load(Ordering::Relaxed);
-            SHOW_UI.store(shown, Ordering::Relaxed);
-            log!(
-                "панель {}",
-                if shown {
-                    "показана"
-                } else {
-                    "скрыта"
-                }
-            );
+        if key_ui.pressed(active) {
+            overlay::toggle_expanded();
         }
 
-        if key_toggle.pressed() {
+        if key_toggle.pressed(active) {
             state::with(|s| {
                 s.auto_fish = !s.auto_fish;
                 s.dirty = true;
@@ -166,7 +172,6 @@ pub fn run(dll_dir: PathBuf) {
             if last_tick.elapsed() >= TICK_INTERVAL {
                 last_tick = Instant::now();
                 fishing.tick(attached, &config);
-                state::with(|s| s.stats.seconds = started.elapsed().as_secs());
             }
             if last_status.elapsed() >= STATUS_INTERVAL {
                 last_status = Instant::now();

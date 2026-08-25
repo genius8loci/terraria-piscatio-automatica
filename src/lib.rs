@@ -7,6 +7,7 @@
 mod app;
 mod clr;
 mod config;
+mod crash;
 mod detour;
 mod fishing;
 mod game;
@@ -69,6 +70,7 @@ fn start() {
     std::thread::spawn(|| {
         let dir = base_dir();
         logging::init(dir.clone());
+        crash::install();
 
         // Паника через FFI-границу убивает игру — гасим её здесь.
         let result = std::panic::catch_unwind(|| app::run(dir));
@@ -83,6 +85,7 @@ fn start() {
         detour::uninstall();
         detour::uninstall_cursor();
         overlay::uninstall();
+        crash::uninstall();
         std::thread::sleep(std::time::Duration::from_millis(250));
 
         if UNLOAD_REQUESTED.swap(false, Ordering::SeqCst) {
