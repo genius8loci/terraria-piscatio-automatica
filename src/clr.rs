@@ -50,6 +50,7 @@ const IID_TYPE: GUID = GUID::from_u128(0xbca8b44d_aad6_3a86_8ab7_03349f4f2da2);
 
 /// BindingFlags из System.Reflection.
 pub const BINDING_INSTANCE: i32 = 4;
+pub const BINDING_STATIC: i32 = 8;
 pub const BINDING_NON_PUBLIC: i32 = 32;
 
 // Номера слотов vtable, снятые из mscorlib.tlb

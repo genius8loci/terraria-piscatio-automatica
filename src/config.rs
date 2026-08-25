@@ -40,6 +40,12 @@ pub struct Config {
     /// Если выключено — просто продолжаем ловить.
     pub quick_stack_when_full: bool,
 
+    /// Рисовать панель из детура `Main.DrawCursor`, чтобы игровой курсор
+    /// ложился поверх неё. Выключить — панель уйдёт в `Present`, и курсор
+    /// придётся рисовать самим. Оставлено на случай, если детур не поладит
+    /// с конкретной сборкой игры.
+    pub cursor_detour: bool,
+
     /// Снять троттлинг игры при потере фокуса (Main.ThrottleWhenInactive = false).
     /// Без этого свёрнутая игра спит по 20 мс на кадр.
     pub disable_inactive_throttle: bool,
@@ -67,6 +73,7 @@ impl Default for Config {
             whitelist: Vec::new(),
             pull_enemy_spawns: false,
             quick_stack_when_full: true,
+            cursor_detour: true,
             disable_inactive_throttle: true,
             jitter_min_ms: 120,
             jitter_max_ms: 480,

@@ -12,7 +12,7 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 
-use crate::clr::{Clr, Field, Var, array_get};
+use crate::clr::{BINDING_NON_PUBLIC, BINDING_STATIC, Clr, Field, Var, array_get};
 
 pub const CMD_NONE: u8 = 0;
 /// Нажать в этом кадре.
@@ -39,6 +39,10 @@ struct Handles {
     players: Field,
     mouse_x: Field,
     mouse_y: Field,
+    /// Сырые экранные координаты курсора: `Main.mouseX` за кадр несколько раз
+    /// меняет смысл, а эти — нет. См. `cursor()`.
+    raw_mouse_x: Option<Field>,
+    raw_mouse_y: Option<Field>,
     mouse_left: Field,
     control_use_item: Field,
     mouse_interface: Field,
@@ -146,11 +150,20 @@ fn attach() -> Option<Handles> {
     let assembly = clr.assembly("Terraria", false).ok()?;
     let main = assembly.get_type("Terraria.Main").ok()?;
     let player = assembly.get_type("Terraria.Player").ok()?;
+    let input = assembly.get_type("Terraria.GameInput.PlayerInput").ok();
+    let raw = |name: &'static str| {
+        input.as_ref().and_then(|t| {
+            t.field_flags(name, BINDING_NON_PUBLIC | BINDING_STATIC)
+                .ok()
+        })
+    };
     Some(Handles {
         my_player: main.field("myPlayer").ok()?,
         players: main.field("player").ok()?,
         mouse_x: main.field("mouseX").ok()?,
         mouse_y: main.field("mouseY").ok()?,
+        raw_mouse_x: raw("_originalMouseX"),
+        raw_mouse_y: raw("_originalMouseY"),
         mouse_left: main.field("mouseLeft").ok()?,
         control_use_item: player.field("controlUseItem").ok()?,
         mouse_interface: player.field("mouseInterface").ok()?,
@@ -196,14 +209,28 @@ fn handles() -> Option<&'static Handles> {
     slot.as_ref()
 }
 
-/// Курсор и левая кнопка глазами игры.
+/// Курсор и левая кнопка глазами игры, в сырых экранных пикселях.
+///
+/// `Main.mouseX` за кадр меняет смысл трижды: `PlayerInput.SetZoom_UI`
+/// делит его на `Main.UIScale`, `SetZoom_World` пересчитывает через зум мира,
+/// и только `SetZoom_Unscaled` возвращает исходное значение. Читать его,
+/// не зная фазы кадра, нельзя — при масштабе интерфейса не 100% попадания
+/// уезжают. Поэтому берём `PlayerInput._originalMouseX/_originalMouseY`:
+/// это и есть то самое исходное значение, оно не зависит от фазы.
 ///
 /// Звать только с игрового потока: хук Present и детур ItemCheck идут
 /// по одному и тому же потоку, так что общие хэндлы безопасны.
 pub fn cursor() -> Option<(i32, i32, bool)> {
     let handles = handles()?;
-    let x = handles.mouse_x.get_static().ok()?.as_int()?;
-    let y = handles.mouse_y.get_static().ok()?.as_int()?;
+    let raw = |field: &Option<Field>, fallback: &Field| -> Option<i32> {
+        field
+            .as_ref()
+            .and_then(|f| f.get_static().ok())
+            .and_then(|v| v.as_int())
+            .or_else(|| fallback.get_static().ok()?.as_int())
+    };
+    let x = raw(&handles.raw_mouse_x, &handles.mouse_x)?;
+    let y = raw(&handles.raw_mouse_y, &handles.mouse_y)?;
     let down = handles
         .mouse_left
         .get_static()

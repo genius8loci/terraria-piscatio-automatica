@@ -25,7 +25,7 @@ mod xnb;
 
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use minhook::MinHook;
@@ -127,6 +127,21 @@ static FONT_TEXTURE: AtomicUsize = AtomicUsize::new(0);
 static DEVICE: AtomicUsize = AtomicUsize::new(0);
 /// Панель уже нарисована детуром курсора в этом кадре.
 static DREW_IN_CURSOR: AtomicBool = AtomicBool::new(false);
+/// Сколько раз панель нарисовалась из детура — видно в строке статуса.
+pub static CURSOR_DRAWS: AtomicU32 = AtomicU32::new(0);
+
+// Ввод снимается только в `Present`. Детур `DrawCursor` — голый хук на
+// managed-метод, и лезть из него обратно в CLR незачем: положение мыши
+// возрастом в один кадр глазу неразличимо, а лишний повод для падения
+// внутри чужого кадра — нет.
+static MOUSE_X: AtomicI32 = AtomicI32::new(-1);
+static MOUSE_Y: AtomicI32 = AtomicI32::new(-1);
+/// Нажатие по фронту, ещё не отданное отрисовке.
+static MOUSE_CLICK: AtomicBool = AtomicBool::new(false);
+/// Курсор над нашим окном — результат последней отрисовки.
+static OVER_UI: AtomicBool = AtomicBool::new(false);
+/// Отрисовка уронила панику: дальше не рисуем, но игру не роняем.
+static BROKEN: AtomicBool = AtomicBool::new(false);
 static ICON_TEXTURE: AtomicUsize = AtomicUsize::new(0);
 static STATE_BLOCK: AtomicUsize = AtomicUsize::new(0);
 
@@ -267,6 +282,7 @@ pub fn uninstall() {
     }
     DEVICE.store(0, Ordering::SeqCst);
     DREW_IN_CURSOR.store(false, Ordering::SeqCst);
+    OVER_UI.store(false, Ordering::SeqCst);
     crate::log!("оверлей: детуры сняты");
 }
 
@@ -463,20 +479,48 @@ unsafe fn present(
         RELEASED.store(true, Ordering::SeqCst);
     }
 
-    DEVICE.store(device as usize, Ordering::Relaxed);
+    // Девайс могли не сбросить, а пересоздать. Тогда наши ресурсы
+    // принадлежат покойнику: освобождать их через мёртвый девайс нельзя,
+    // остаётся забыть указатели и дать пересоздать заново.
+    let previous = DEVICE.swap(device as usize, Ordering::SeqCst);
+    if previous != 0 && previous != device as usize {
+        forget_resources();
+    }
 
     if ACTIVE.load(Ordering::Relaxed) {
         crate::FRAME.fetch_add(1, Ordering::Relaxed);
         if !FIRST_FRAME_LOGGED.swap(true, Ordering::SeqCst) {
             crate::log!("оверлей: первый кадр перехвачен, рендер работает");
         }
+
+        // Ввод глазами игры — единственное место, где мы трогаем CLR
+        // из кадра. Детур курсора читает уже готовые значения.
+        let (mx, my, down) = crate::input::cursor().unwrap_or((-1, -1, false));
+        feed_input(mx, my, down);
+
+        // Ресурсы заводим только здесь. В детуре курсора мы внутри чужой
+        // открытой сцены, и создавать там текстуры незачем: `Present`
+        // случается каждый кадр и успевает подготовить всё заранее.
+        let shown = SHOW_UI.load(Ordering::Relaxed);
+        if shown {
+            prepare(device);
+        }
+        if !shown {
+            OVER_UI.store(false, Ordering::Relaxed);
+            // Иначе нажатие, сделанное при скрытой панели, сработает,
+            // как только её покажут.
+            MOUSE_CLICK.store(false, Ordering::Relaxed);
+        }
+        // Пока курсор над окном, игра не должна считать клик игровым.
+        // Значение посчитал детур курсора чуть раньше в этом же кадре.
+        crate::input::set_mouse_interface(OVER_UI.load(Ordering::Relaxed));
+
         // Обычно панель рисует детур `DrawCursor` — там она ложится под
         // курсор игры. Сюда доходим, только если детур не встал или игра
         // в этом кадре курсор не рисовала: тогда рисуем сами, вместе с ним.
         let already = DREW_IN_CURSOR.swap(false, Ordering::SeqCst);
-        if !already && SHOW_UI.load(Ordering::Relaxed) {
-            // Паника внутри чужого кадра убьёт игру — гасим на месте.
-            let _ = catch_unwind(AssertUnwindSafe(|| unsafe { draw(device, true) }));
+        if !already && shown && !BROKEN.load(Ordering::Relaxed) {
+            guarded(device, true);
         }
     }
 
@@ -527,6 +571,17 @@ fn release_resources(reason: &str) {
     }
     if texture != 0 || block != 0 || icons != 0 {
         crate::log!("оверлей: ресурсы освобождены ({reason})");
+    }
+}
+
+/// Забывает ресурсы, не освобождая: владелец мёртв, и `Release` по его
+/// объектам — обращение к освобождённой памяти. Утечка здесь безопаснее.
+fn forget_resources() {
+    let font = FONT_TEXTURE.swap(0, Ordering::SeqCst);
+    let icons = ICON_TEXTURE.swap(0, Ordering::SeqCst);
+    let block = STATE_BLOCK.swap(0, Ordering::SeqCst);
+    if font != 0 || icons != 0 || block != 0 {
+        crate::log!("оверлей: девайс сменился, старые ресурсы брошены");
     }
 }
 
@@ -898,31 +953,73 @@ fn ensure_icons(device: &IDirect3DDevice9) {
     }
 }
 
+/// Принимает ввод, снятый с игры. Отрисовка берёт координаты отсюда, а не
+/// из CLR: детур курсора идёт по чужому кадру, и лишний вызов в рантайм
+/// оттуда — лишний повод упасть. Нажатие запоминается по фронту и живёт
+/// до ближайшей отрисовки, которая его и заберёт.
+pub(crate) fn feed_input(x: i32, y: i32, down: bool) {
+    MOUSE_X.store(x, Ordering::Relaxed);
+    MOUSE_Y.store(y, Ordering::Relaxed);
+    if down && !MOUSE_WAS_DOWN.swap(down, Ordering::Relaxed) {
+        MOUSE_CLICK.store(true, Ordering::Relaxed);
+    } else if !down {
+        MOUSE_WAS_DOWN.store(false, Ordering::Relaxed);
+    }
+}
+
 /// Зовётся из детура `Main.DrawCursor`, с игрового потока и внутри кадра.
 /// Здесь весь интерфейс игры уже выгружен на экран, а курсор ещё нет.
 pub fn on_draw_cursor() {
-    if !ACTIVE.load(Ordering::Relaxed) || !SHOW_UI.load(Ordering::Relaxed) {
+    if !ACTIVE.load(Ordering::Relaxed)
+        || !SHOW_UI.load(Ordering::Relaxed)
+        || BROKEN.load(Ordering::Relaxed)
+    {
         return;
     }
     let raw = DEVICE.load(Ordering::Relaxed);
-    if raw == 0 || DREW_IN_CURSOR.swap(true, Ordering::SeqCst) {
+    // Ресурсов ещё нет (первый кадр или только что был `Reset`) — пропускаем
+    // ход: их заведёт `Present`, он же в этом кадре и нарисует.
+    if raw == 0 || !resources_ready() || DREW_IN_CURSOR.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
-        draw(raw as *mut c_void, false)
-    }));
+    CURSOR_DRAWS.fetch_add(1, Ordering::Relaxed);
+    guarded(raw as *mut c_void, false);
+}
+
+/// Отрисовка под `catch_unwind`: паника внутри чужого кадра убьёт игру.
+/// Первая же паника гасит панель насовсем — молча повторять её каждый кадр
+/// хуже, чем остаться без интерфейса, а в логе будет видно, что случилось.
+fn guarded(device: *mut c_void, own_cursor: bool) {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe { draw(device, own_cursor) }));
+    if result.is_err() && !BROKEN.swap(true, Ordering::SeqCst) {
+        crate::log!("оверлей: паника при отрисовке, панель отключена");
+    }
 }
 
 /// `own_cursor` — рисовать ли курсор самим. Из детура не надо: игра
 /// нарисует свой сразу после нас.
+/// Заводит текстуры и блок состояния, если их нет. Зовётся только из
+/// `Present`, вне чужой сцены.
+pub(crate) fn prepare(raw: *mut c_void) {
+    let Some(device) = (unsafe { IDirect3DDevice9::from_raw_borrowed(&raw) }) else {
+        return;
+    };
+    if ensure_resources(device) {
+        ensure_icons(device);
+    }
+}
+
+fn resources_ready() -> bool {
+    FONT_TEXTURE.load(Ordering::Relaxed) != 0 && STATE_BLOCK.load(Ordering::Relaxed) != 0
+}
+
 pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
     let Some(device) = (unsafe { IDirect3DDevice9::from_raw_borrowed(&raw) }) else {
         return;
     };
-    if !ensure_resources(device) {
+    if !resources_ready() {
         return;
     }
-    ensure_icons(device);
 
     let mut ui_quads: Vec<Vertex> = Vec::with_capacity(2048);
     let mut text: Vec<Vertex> = Vec::with_capacity(2048);
@@ -935,14 +1032,11 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
         }
     };
 
-    // Ввод берём глазами игры: те же координаты, что и у нашей отрисовки.
-    let (mx, my, down) = crate::input::cursor().unwrap_or((-1, -1, false));
-    let clicked = down && !MOUSE_WAS_DOWN.load(Ordering::Relaxed);
-    MOUSE_WAS_DOWN.store(down, Ordering::Relaxed);
+    // Ввод снят в `Present`; нажатие забираем, чтобы не сработало дважды.
     let input = ui::Input {
-        x: mx as f32,
-        y: my as f32,
-        clicked,
+        x: MOUSE_X.load(Ordering::Relaxed) as f32,
+        y: MOUSE_Y.load(Ordering::Relaxed) as f32,
+        clicked: MOUSE_CLICK.swap(false, Ordering::Relaxed),
     };
 
     let over_ui = {
@@ -963,8 +1057,7 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
         ui::build(&mut painter, ui_state, input, screen, own_cursor)
     };
 
-    // Пока курсор над окном, игра не должна считать клик игровым.
-    crate::input::set_mouse_interface(over_ui);
+    OVER_UI.store(over_ui, Ordering::Relaxed);
 
     let texture_ptr = FONT_TEXTURE.load(Ordering::Relaxed);
     let block_ptr = STATE_BLOCK.load(Ordering::Relaxed);

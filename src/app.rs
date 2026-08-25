@@ -125,7 +125,11 @@ pub fn run(dll_dir: PathBuf) {
                     apply_settings(&attached, &config);
                     let ready = install_detour(&attached);
                     state::with(|s| s.status.detour_ready = ready);
-                    install_cursor_detour(&attached);
+                    if config.cursor_detour {
+                        install_cursor_detour(&attached);
+                    } else {
+                        log!("детур DrawCursor отключён в конфиге");
+                    }
                     load_fishable(&attached);
                     game = Some(attached);
                 }
@@ -155,11 +159,12 @@ pub fn run(dll_dir: PathBuf) {
             if last_status.elapsed() >= STATUS_INTERVAL {
                 last_status = Instant::now();
                 log!(
-                    "статус: {} | детур сработал {} раз, кликов {}, сбоев {}",
+                    "статус: {} | детур сработал {} раз, кликов {}, сбоев {},                      панель из DrawCursor {} раз",
                     fishing.status(),
                     input::FIRED.load(Ordering::Relaxed),
                     input::CLICKS.load(Ordering::Relaxed),
-                    input::FAILURES.load(Ordering::Relaxed)
+                    input::FAILURES.load(Ordering::Relaxed),
+                    overlay::CURSOR_DRAWS.load(Ordering::Relaxed)
                 );
             }
         }
@@ -265,6 +270,7 @@ fn install_cursor_detour(game: &Game) {
     match game.draw_cursor_address() {
         Ok(address) => {
             log!("детур DrawCursor: адрес 0x{address:08X}");
+            log!("детур DrawCursor: первые байты {}", detour::peek(address));
             if detour::install_cursor(address) {
                 log!("детур DrawCursor установлен");
             }
