@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use crate::overlay::xnb::{GameFont, Glyph};
 use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, CreateFontW,
@@ -23,28 +24,8 @@ const FONT_HEIGHT: i32 = 16;
 /// Запас вокруг глифа, чтобы соседние ячейки не смешивались при билинейной фильтрации.
 const GUTTER: u32 = 2;
 
-pub struct FontAtlas {
-    pub width: u32,
-    pub height: u32,
-    pub cell_w: u32,
-    pub cell_h: u32,
-    /// Шаг курсора при выводе строки — уже без запаса ячейки.
-    pub advance: u32,
-    /// Пиксели A8R8G8B8: цвет белый, прозрачность взята из яркости глифа.
-    pub pixels: Vec<u32>,
-    index: HashMap<char, u32>,
-}
-
-impl FontAtlas {
-    /// Левый верхний угол ячейки символа, если он поддерживается.
-    pub fn cell(&self, ch: char) -> Option<(u32, u32)> {
-        let i = *self.index.get(&ch)?;
-        Some(((i % COLS) * self.cell_w, (i / COLS) * self.cell_h))
-    }
-}
-
 /// Набор символов: латиница, знаки, кириллица.
-fn charset() -> Vec<char> {
+pub fn charset() -> Vec<char> {
     let mut chars: Vec<char> = (32u32..127).filter_map(char::from_u32).collect();
     chars.extend((0x410u32..=0x44f).filter_map(char::from_u32));
     chars.push('Ё');
@@ -54,7 +35,7 @@ fn charset() -> Vec<char> {
     chars
 }
 
-pub fn build() -> Option<FontAtlas> {
+pub fn build() -> Option<GameFont> {
     let chars = charset();
     let rows = chars.len().div_ceil(COLS as usize) as u32;
 
@@ -135,14 +116,25 @@ pub fn build() -> Option<FontAtlas> {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, COLORREF(0x00FF_FFFF));
 
-        let mut index = HashMap::new();
+        let mut glyphs = HashMap::new();
         for (i, ch) in chars.iter().enumerate() {
             let i = i as u32;
-            let x = ((i % COLS) * cell_w) as i32;
-            let y = ((i / COLS) * cell_h) as i32;
+            let x = (i % COLS) * cell_w;
+            let y = (i / COLS) * cell_h;
             let text: Vec<u16> = ch.encode_utf16(&mut [0u16; 2]).to_vec();
-            let _ = TextOutW(dc, x, y, &text);
-            index.insert(*ch, i);
+            let _ = TextOutW(dc, x as i32, y as i32, &text);
+            glyphs.insert(
+                *ch,
+                Glyph {
+                    sx: x,
+                    sy: y,
+                    w: cell_w,
+                    h: cell_h,
+                    off_x: 0.0,
+                    off_y: 0.0,
+                    advance: advance as f32,
+                },
+            );
         }
 
         // Забираем растр до освобождения GDI-объектов.
@@ -165,14 +157,13 @@ pub fn build() -> Option<FontAtlas> {
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
         let _ = DeleteDC(dc);
 
-        Some(FontAtlas {
+        Some(GameFont {
             width,
             height,
-            cell_w,
-            cell_h,
-            advance,
             pixels,
-            index,
+            line_height: cell_h as f32,
+            space_advance: advance as f32,
+            glyphs,
         })
     }
 }

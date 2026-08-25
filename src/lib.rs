@@ -71,6 +71,11 @@ fn start() {
 
         STARTED.store(false, Ordering::SeqCst);
 
+        // Детуры обязаны быть сняты до выгрузки: иначе следующий кадр
+        // прыгнет по адресу уже отображённого кода.
+        overlay::uninstall();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
         if UNLOAD_REQUESTED.swap(false, Ordering::SeqCst) {
             let handle = MODULE.load(Ordering::Relaxed);
             if handle != 0 {

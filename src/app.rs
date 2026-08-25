@@ -65,29 +65,35 @@ impl Watcher {
             FilterMode::Blacklist => format!("чёрный список ({})", config.blacklist.len()),
             FilterMode::Whitelist => format!("белый список ({})", config.whitelist.len()),
         };
+        let pair = |label: &str, value: String| (label.to_string(), value);
         overlay::set_lines(vec![
-            format!("состояние : {}", self.state_line),
-            format!(
-                "рыбалка   : {}",
+            pair("состояние", self.state_line.clone()),
+            pair(
+                "рыбалка",
                 if enabled {
                     "включена"
                 } else {
                     "выключена"
                 }
+                .to_string(),
             ),
-            format!("фильтр    : {filter}"),
-            format!(
-                "сундуки   : {}",
+            pair("фильтр", filter),
+            pair(
+                "сундуки",
                 if config.quick_stack_when_full {
                     "разложить при заполнении"
                 } else {
                     "не трогать"
                 }
+                .to_string(),
             ),
-            format!("поплавок  : {}", self.bobber_line),
-            format!("запасы    : {}", self.stock_line),
-            String::new(),
-            "вверх — панель, вниз — старт/стоп, Delete — выгрузка".to_string(),
+            pair("поплавок", self.bobber_line.clone()),
+            pair("запасы", self.stock_line.clone()),
+            (String::new(), String::new()),
+            (
+                String::new(),
+                "вверх — панель, вниз — старт/стоп, Delete — выгрузка".to_string(),
+            ),
         ]);
     }
 }
