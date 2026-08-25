@@ -7,13 +7,16 @@
 mod app;
 mod clr;
 mod config;
+mod detour;
+mod fishing;
 mod game;
+mod input;
 pub mod logging;
 mod overlay;
 
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use windows::Win32::Foundation::{HMODULE, MAX_PATH};
 use windows::Win32::System::LibraryLoader::{
@@ -26,6 +29,10 @@ const DLL_PROCESS_DETACH: u32 = 0;
 pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub(crate) static UNLOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub(crate) static SHOW_UI: AtomicBool = AtomicBool::new(false);
+/// Счётчик кадров: наращивается в хуке Present, служит границей кадра
+/// для детура `Player.ItemCheck` (на сервере он вызывается по разу
+/// на каждого игрока, и нажатие с отпусканием слиплись бы в один кадр).
+pub(crate) static FRAME: AtomicU32 = AtomicU32::new(0);
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static MODULE: AtomicUsize = AtomicUsize::new(0);
@@ -73,6 +80,7 @@ fn start() {
 
         // Детуры обязаны быть сняты до выгрузки: иначе следующий кадр
         // прыгнет по адресу уже отображённого кода.
+        detour::uninstall();
         overlay::uninstall();
         std::thread::sleep(std::time::Duration::from_millis(250));
 

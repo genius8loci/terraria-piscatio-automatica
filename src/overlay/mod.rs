@@ -390,6 +390,7 @@ unsafe fn present(
     dirty: *const c_void,
 ) -> HRESULT {
     if ACTIVE.load(Ordering::Relaxed) {
+        crate::FRAME.fetch_add(1, Ordering::Relaxed);
         if !FIRST_FRAME_LOGGED.swap(true, Ordering::SeqCst) {
             crate::log!("оверлей: первый кадр перехвачен, рендер работает");
         }

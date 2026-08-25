@@ -1,11 +1,7 @@
-//! Рабочий поток: хоткеи и наблюдение за состоянием рыбалки.
+//! Рабочий поток: хоткеи, автомат рыбалки и панель состояния.
 //!
 //! Цикл хоткеев живёт независимо от подключения к игре — иначе неудачный
 //! attach убивал бы поток вместе с возможностью выгрузить DLL.
-//!
-//! На этом этапе поток только читает состояние и пишет в лог. Управление
-//! забросом переедет в детур `Player.ItemCheck`, потому что при свёрнутом
-//! окне реальный ввод игрой игнорируется.
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -15,13 +11,14 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninit
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
 use crate::config::{Config, FilterMode};
+use crate::fishing::Fishing;
 use crate::game::Game;
-use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, log, overlay};
+use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, detour, input, log, overlay};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
-/// Полный перебор снарядов недёшев, поэтому состояние читаем реже опроса клавиш.
-const OBSERVE_INTERVAL: Duration = Duration::from_millis(250);
-const STATUS_INTERVAL: Duration = Duration::from_secs(5);
+/// Чтение состояния игры заметно дороже опроса клавиш.
+const TICK_INTERVAL: Duration = Duration::from_millis(120);
+const STATUS_INTERVAL: Duration = Duration::from_secs(10);
 /// Игра может быть ещё в сплэше — сборка Terraria появится не сразу.
 const ATTACH_RETRY: Duration = Duration::from_millis(750);
 const ATTACH_ATTEMPTS: u32 = 40;
@@ -48,56 +45,6 @@ impl KeyEdge {
     }
 }
 
-struct Watcher {
-    last_status: Instant,
-    last_observe: Instant,
-    last_bite: i32,
-    bobber_hint: Option<i32>,
-    /// Строки для панели оверлея.
-    state_line: String,
-    bobber_line: String,
-    stock_line: String,
-}
-
-impl Watcher {
-    fn publish(&self, config: &Config, enabled: bool) {
-        let filter = match config.filter_mode {
-            FilterMode::Blacklist => format!("чёрный список ({})", config.blacklist.len()),
-            FilterMode::Whitelist => format!("белый список ({})", config.whitelist.len()),
-        };
-        let pair = |label: &str, value: String| (label.to_string(), value);
-        overlay::set_lines(vec![
-            pair("состояние", self.state_line.clone()),
-            pair(
-                "рыбалка",
-                if enabled {
-                    "включена"
-                } else {
-                    "выключена"
-                }
-                .to_string(),
-            ),
-            pair("фильтр", filter),
-            pair(
-                "сундуки",
-                if config.quick_stack_when_full {
-                    "разложить при заполнении"
-                } else {
-                    "не трогать"
-                }
-                .to_string(),
-            ),
-            pair("поплавок", self.bobber_line.clone()),
-            pair("запасы", self.stock_line.clone()),
-            (String::new(), String::new()),
-            (
-                String::new(),
-                "вверх — панель, вниз — старт/стоп, Delete — выгрузка".to_string(),
-            ),
-        ]);
-    }
-}
-
 pub fn run(dll_dir: PathBuf) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -110,7 +57,7 @@ pub fn run(dll_dir: PathBuf) {
         config.quick_stack_when_full,
         config.disable_inactive_throttle
     );
-    log!("хоткеи: вверх — UI, вниз — старт/стоп, Delete — выгрузка");
+    log!("хоткеи: вверх — панель, вниз — старт/стоп, Delete — выгрузка");
 
     let mut key_ui = KeyEdge::new(config.hotkey_ui);
     let mut key_toggle = KeyEdge::new(config.hotkey_toggle);
@@ -120,22 +67,17 @@ pub fn run(dll_dir: PathBuf) {
     let mut attempts: u32 = 0;
     let mut next_attach = Instant::now();
     let mut gave_up = false;
-    let mut enabled = false;
+    let mut state_line = "ищу игру".to_string();
+    let mut detour_line = "не установлен".to_string();
 
-    let mut watcher = Watcher {
-        last_status: Instant::now() - STATUS_INTERVAL,
-        last_observe: Instant::now() - OBSERVE_INTERVAL,
-        last_bite: 0,
-        bobber_hint: None,
-        state_line: "ищу игру".to_string(),
-        bobber_line: "нет".to_string(),
-        stock_line: "неизвестно".to_string(),
-    };
+    let mut fishing = Fishing::new();
+    let mut last_tick = Instant::now() - TICK_INTERVAL;
+    let mut last_status = Instant::now() - STATUS_INTERVAL;
 
     if overlay::install() {
         log!("оверлей установлен, панель по стрелке вверх");
     }
-    watcher.publish(&config, enabled);
+    publish(&config, &fishing, &state_line, &detour_line);
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
         // Хоткеи опрашиваем первыми и всегда: выгрузка должна работать
@@ -150,28 +92,19 @@ pub fn run(dll_dir: PathBuf) {
         if key_ui.pressed() {
             let shown = !SHOW_UI.load(Ordering::Relaxed);
             SHOW_UI.store(shown, Ordering::Relaxed);
-            watcher.publish(&config, enabled);
             log!(
-                "UI {}",
+                "панель {}",
                 if shown {
-                    "показан"
+                    "показана"
                 } else {
-                    "скрыт"
+                    "скрыта"
                 }
             );
         }
 
         if key_toggle.pressed() {
-            enabled = !enabled;
-            watcher.publish(&config, enabled);
-            log!(
-                "рыбалка {}",
-                if enabled {
-                    "включена"
-                } else {
-                    "выключена"
-                }
-            );
+            fishing.toggle();
+            publish(&config, &fishing, &state_line, &detour_line);
         }
 
         if game.is_none() && !gave_up && Instant::now() >= next_attach {
@@ -180,14 +113,12 @@ pub fn run(dll_dir: PathBuf) {
             match Game::attach(verbose) {
                 Ok(attached) => {
                     log!("подключились к игре с попытки {attempts}");
-                    watcher.state_line = match attached.version() {
+                    state_line = match attached.version() {
                         Some(v) => format!("подключено, {v}"),
                         None => "подключено".to_string(),
                     };
-                    if let Some(version) = attached.version() {
-                        log!("версия игры: {version}");
-                    }
                     apply_settings(&attached, &config);
+                    detour_line = install_detour(&attached);
                     game = Some(attached);
                 }
                 Err(e) => {
@@ -196,10 +127,10 @@ pub fn run(dll_dir: PathBuf) {
                     }
                     if attempts >= ATTACH_ATTEMPTS {
                         gave_up = true;
-                        watcher.state_line = "игра не найдена".to_string();
+                        state_line = "игра не найдена".to_string();
                         log!(
                             "подключиться не удалось за {ATTACH_ATTEMPTS} попыток. \
-                             Хоткеи продолжают работать, выгрузка по Delete доступна"
+                             Хоткеи работают, выгрузка по Delete доступна"
                         );
                     }
                     next_attach = Instant::now() + ATTACH_RETRY;
@@ -208,10 +139,20 @@ pub fn run(dll_dir: PathBuf) {
         }
 
         if let Some(attached) = game.as_ref() {
-            if watcher.last_observe.elapsed() >= OBSERVE_INTERVAL {
-                watcher.last_observe = Instant::now();
-                observe(attached, &config, &mut watcher);
-                watcher.publish(&config, enabled);
+            if last_tick.elapsed() >= TICK_INTERVAL {
+                last_tick = Instant::now();
+                fishing.tick(attached, &config);
+                publish(&config, &fishing, &state_line, &detour_line);
+            }
+            if last_status.elapsed() >= STATUS_INTERVAL {
+                last_status = Instant::now();
+                log!(
+                    "статус: {} | детур сработал {} раз, кликов {}, сбоев {}",
+                    fishing.status(),
+                    input::FIRED.load(Ordering::Relaxed),
+                    input::CLICKS.load(Ordering::Relaxed),
+                    input::FAILURES.load(Ordering::Relaxed)
+                );
             }
         }
 
@@ -220,6 +161,26 @@ pub fn run(dll_dir: PathBuf) {
 
     log!("рабочий поток остановлен");
     unsafe { CoUninitialize() };
+}
+
+/// Ставит детур на `Player.ItemCheck` и возвращает строку для панели.
+fn install_detour(game: &Game) -> String {
+    let address = match game.item_check_address() {
+        Ok(a) => a,
+        Err(e) => {
+            log!("детур ItemCheck: адрес получить не удалось: {e}");
+            return "адрес не получен".to_string();
+        }
+    };
+    log!("детур ItemCheck: адрес 0x{address:08X}");
+    log!("детур ItemCheck: первые байты {}", detour::peek(address));
+
+    if detour::install(address) {
+        log!("детур ItemCheck установлен");
+        "установлен".to_string()
+    } else {
+        "не встал".to_string()
+    }
 }
 
 fn apply_settings(game: &Game, config: &Config) {
@@ -236,96 +197,32 @@ fn apply_settings(game: &Game, config: &Config) {
     }
 }
 
-/// Пока автомат заброса не подключён, наблюдаем и подтверждаем,
-/// что состояние поплавка читается корректно.
-fn observe(game: &Game, config: &Config, watcher: &mut Watcher) {
-    match game.find_bobber(watcher.bobber_hint) {
-        Ok(Some(bobber)) => {
-            watcher.bobber_hint = Some(bobber.index);
-            watcher.bobber_line = if bobber.has_bite() {
-                let rolled = bobber.rolled();
-                format!(
-                    "#{} КЛЮЁТ {} {rolled} -> {}",
-                    bobber.index,
-                    if rolled > 0 { "предмет" } else { "NPC" },
-                    if config.should_pull(rolled) {
-                        "берём"
-                    } else {
-                        "пропуск"
-                    }
-                )
-            } else if bobber.is_reeling() {
-                format!("#{} тянется", bobber.index)
-            } else {
-                format!("#{} ждём, заряд {:.0}/660", bobber.index, bobber.local_ai1)
-            };
-
-            if bobber.has_bite() {
-                let rolled = bobber.rolled();
-                if rolled != watcher.last_bite {
-                    watcher.last_bite = rolled;
-                    let decision = if config.should_pull(rolled) {
-                        "подсекаем"
-                    } else {
-                        "пропускаем"
-                    };
-                    log!(
-                        "поклёвка: localAI[1]={rolled} ({}), ai[1]={:.0} -> {decision}",
-                        if rolled > 0 { "предмет" } else { "NPC" },
-                        bobber.ai1
-                    );
-                }
-            } else {
-                watcher.last_bite = 0;
-            }
-
-            if watcher.last_status.elapsed() >= STATUS_INTERVAL {
-                watcher.last_status = Instant::now();
-                log!(
-                    "поплавок #{}: ai[0]={:.0} ai[1]={:.0} localAI[1]={:.0}{}",
-                    bobber.index,
-                    bobber.ai0,
-                    bobber.ai1,
-                    bobber.local_ai1,
-                    if bobber.is_reeling() {
-                        " (тянется)"
-                    } else {
-                        ""
-                    }
-                );
-            }
-        }
-        Ok(None) => {
-            watcher.bobber_hint = None;
-            watcher.bobber_line = "не заброшен".to_string();
-            watcher.stock_line = stock(game, watcher.last_status.elapsed() >= STATUS_INTERVAL);
-            if watcher.last_status.elapsed() >= STATUS_INTERVAL {
-                watcher.last_status = Instant::now();
-            }
-        }
-        Err(e) => {
-            log!("чтение поплавка не удалось: {e}");
-            watcher.last_observe = Instant::now() + Duration::from_secs(1);
-        }
-    }
-}
-
-/// Наживка и свободные слоты. `verbose` дублирует значения в лог.
-fn stock(game: &Game, verbose: bool) -> String {
-    let Ok(Some(player)) = game.local_player() else {
-        if verbose {
-            log!("локальный игрок пока недоступен");
-        }
-        return "игрок недоступен".to_string();
+fn publish(config: &Config, fishing: &Fishing, state: &str, detour_line: &str) {
+    let filter = match config.filter_mode {
+        FilterMode::Blacklist => format!("чёрный список ({})", config.blacklist.len()),
+        FilterMode::Whitelist => format!("белый список ({})", config.whitelist.len()),
     };
-    let bait = game.bait_total(&player).unwrap_or(-1);
-    let free = game.free_slots(&player).unwrap_or(-1);
-    if verbose {
-        log!("поплавка нет. наживка={bait}, свободных слотов={free}");
-    }
-    if bait == 0 {
-        format!("НАЖИВКИ НЕТ, слотов {free}")
-    } else {
-        format!("наживка {bait}, слотов {free}")
-    }
+    let pair = |label: &str, value: String| (label.to_string(), value);
+    overlay::set_lines(vec![
+        pair("состояние", state.to_string()),
+        pair("детур", detour_line.to_string()),
+        pair("рыбалка", fishing.status()),
+        pair("фильтр", filter),
+        pair(
+            "сундуки",
+            if config.quick_stack_when_full {
+                "разложить при заполнении"
+            } else {
+                "не трогать"
+            }
+            .to_string(),
+        ),
+        pair("поплавок", fishing.bobber_line.clone()),
+        pair("запасы", fishing.stock_line.clone()),
+        (String::new(), String::new()),
+        (
+            String::new(),
+            "вверх — панель, вниз — старт/стоп, Delete — выгрузка".to_string(),
+        ),
+    ]);
 }

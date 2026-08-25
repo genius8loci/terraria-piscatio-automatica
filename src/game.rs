@@ -50,6 +50,13 @@ pub struct Game {
     f_projectile: Field,
     f_throttle: Field,
     f_version: Option<Field>,
+    f_mouse_x: Field,
+    f_mouse_y: Field,
+
+    /// Для получения адреса JIT-кода `Player.ItemCheck`.
+    m_item_check: Method,
+    m_get_method_handle: Method,
+    m_get_function_pointer: Method,
 
     pr_active: Field,
     pr_bobber: Field,
@@ -83,7 +90,17 @@ impl Game {
             crate::log!("шаг 5: типы Main/Projectile/Player/Item получены");
         }
 
+        let mscorlib = clr.assembly("mscorlib", false)?;
+        let method_base = mscorlib.get_type("System.Reflection.MethodBase")?;
+        let method_handle = mscorlib.get_type("System.RuntimeMethodHandle")?;
+
         let game = Game {
+            f_mouse_x: main.field("mouseX")?,
+            f_mouse_y: main.field("mouseY")?,
+            m_item_check: player.method("ItemCheck")?,
+            m_get_method_handle: method_base.method("get_MethodHandle")?,
+            m_get_function_pointer: method_handle.method("GetFunctionPointer")?,
+
             f_my_player: main.field("myPlayer")?,
             f_player: main.field("player")?,
             f_projectile: main.field("projectile")?,
@@ -138,6 +155,28 @@ impl Game {
 
     pub fn inactive_throttle(&self) -> Result<bool> {
         Ok(self.f_throttle.get_static()?.as_bool().unwrap_or(true))
+    }
+
+    /// Экранные координаты курсора игры.
+    pub fn mouse(&self) -> Result<(i32, i32)> {
+        Ok((
+            self.f_mouse_x.get_static()?.as_int().unwrap_or(-1),
+            self.f_mouse_y.get_static()?.as_int().unwrap_or(-1),
+        ))
+    }
+
+    /// Адрес JIT-кода `Player.ItemCheck` — цель для детура.
+    ///
+    /// `MethodInfo.MethodHandle.GetFunctionPointer()` возвращает стабильную
+    /// точку входа; метод вызывается каждый кадр, так что к моменту
+    /// подключения он давно скомпилирован.
+    pub fn item_check_address(&self) -> Result<usize> {
+        let method = self.m_item_check.as_var();
+        let handle = self.m_get_method_handle.invoke(&method, &[])?;
+        let pointer = self.m_get_function_pointer.invoke(&handle, &[])?;
+        pointer
+            .as_ptr()
+            .ok_or_else(|| crate::clr::err("GetFunctionPointer вернул не указатель"))
     }
 
     pub fn version(&self) -> Option<String> {
