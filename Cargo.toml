@@ -1,23 +1,64 @@
 [package]
 name = "terraria-piscatio-automatica"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
+# Голые функции (`#[unsafe(naked)]` + `naked_asm!`) стабильны с 1.88 —
+# на них держится детур managed-метода.
+rust-version = "1.88"
 authors = ["@Genius_Loci https://t.me/Genius_Loci"]
-description = "Коллектор данных с кассы"
+description = "terraria piscatio automatica"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/genius8loci/terraria-piscatio-automatica"
+homepage = "https://github.com/genius8loci/terraria-piscatio-automatica"
+keywords = ["terraria", "fishing", "hook", "d3d9", "clr"]
+categories = ["game-development"]
+publish = false
+
+[package.metadata.piscatio]
+target-game = "Terraria 1.4.5.8 (x86, .NET Framework 4 + XNA 4.0)"
+contact = "https://t.me/Genius_Loci"
 
 [lib]
 name = "piscatio"
 crate-type = ["cdylib"]
 
 [dependencies]
+# Распаковка XNB: контент Terraria сжат LZX.
 lzxd = "0.2.7"
+# Inline-детуры. `retour` не собирается под i686 на актуальном rustc.
 minhook = "0.9.0"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_ClrHosting", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Ole", "Win32_System_SystemInformation", "Win32_Graphics_Direct3D9", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Memory"] }
+
+[dependencies.windows]
+version = "0.62.2"
+features = [
+    "Win32_Foundation",
+    # Подключение к CLR игры и рефлексия.
+    "Win32_System_ClrHosting",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    # Оверлей.
+    "Win32_Graphics_Direct3D9",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Memory",
+    "Win32_UI_WindowsAndMessaging",
+    # Служебное: модули, потоки, хоткеи, время для лога.
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+]
+
+[build-dependencies]
+# Кладёт VERSIONINFO в PE, чтобы данные пакета были видны в свойствах DLL.
+winresource = "0.1"
 
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
+# Символы срезаем, таблица экспортов (DllMain / Start / Stop) остаётся.
 strip = true

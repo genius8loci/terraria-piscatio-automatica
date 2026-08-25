@@ -161,13 +161,14 @@ dependencies = [
 
 [[package]]
 name = "terraria-piscatio-automatica"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "lzxd",
  "minhook",
  "serde",
  "toml",
  "windows",
+ "winresource",
 ]
 
 [[package]]
@@ -246,6 +247,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "windows"
@@ -362,3 +369,13 @@ name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+
+[[package]]
+name = "winresource"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+dependencies = [
+ "toml",
+ "version_check",
+]
