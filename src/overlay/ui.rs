@@ -30,8 +30,10 @@ const TITLE: &str = concat!(
 const DENSITY: f32 = 0.9;
 
 /// Подписи строк — по самой длинной из них считается ширина панели.
+/// У авторыбалки берётся с самым длинным припиской, иначе координаты
+/// заброса налезали бы на звёздочку.
 const LABELS: &[&str] = &[
-    "Авторыбалка",
+    "Авторыбалка (зафиксировано 1920:1080)",
     "Сундуки разложить при заполнении",
     "Подсекать врагов (Герцог Рыброн)",
     "Поплавок",
@@ -55,6 +57,10 @@ const TOGGLE: f32 = 14.0;
 const CROSS_SIZE: f32 = 0.7;
 /// Сторона уголка на кнопке сворачивания.
 const CHEVRON: f32 = 16.0;
+/// Подсказка в пустой строке поиска — как у игры в её собственных полях.
+const SEARCH_HINT: &str = "Имя:";
+/// Полпериода мигания курсора ввода, в кадрах.
+const BLINK: u32 = 30;
 /// Поле от нижнего края экрана, ниже которого окно фильтра не растёт.
 const SCREEN_MARGIN: f32 = 24.0;
 const BAR_W: f32 = 20.0;
@@ -136,6 +142,8 @@ pub struct Layout<'a, 'b> {
     painter: &'a mut Painter<'b>,
     input: Input,
     scale: f32,
+    /// Номер кадра — по нему моргает курсор ввода.
+    frames: u32,
     /// Курсор попал хоть в одну нашу область — игре клик отдавать нельзя.
     pub over_ui: bool,
     /// Предмет под курсором — по нему покажем подсказку игры.
@@ -153,6 +161,18 @@ impl<'a, 'b> Layout<'a, 'b> {
 
     fn hovered(&self, r: Rect) -> bool {
         r.contains(self.input.x, self.input.y)
+    }
+
+    /// Золотая рамка поверх области — так игра показывает наведение
+    /// и фокус в бестиарии.
+    fn frame(&mut self, r: Rect, id: i32) {
+        self.painter
+            .nine_slice(id, r.x, r.y, r.w, r.h, icons::FRAME_INSET, colors::PLAIN);
+    }
+
+    /// Мигание курсора ввода: примерно раз в полсекунды, как у игры.
+    fn blink(&self) -> bool {
+        self.frames % (BLINK * 2) < BLINK
     }
 
     /// Ячейка предмета: попадание плюс заявка на подсказку.
@@ -238,7 +258,9 @@ impl<'a, 'b> Layout<'a, 'b> {
         }
     }
 
-    /// Переключатель из меню настроек: кольцо — выключено, диск — включено.
+    /// Переключатель — звёздочка ранга из бестиария: золотая включено,
+    /// тусклая выключено. Цвет у обеих свой, поэтому красим их белым;
+    /// наведение показываем золотой рамкой, как игра.
     fn toggle(&mut self, r: Rect, on: bool) -> bool {
         let clicked = self.hit(r);
         let id = if on {
@@ -246,23 +268,44 @@ impl<'a, 'b> Layout<'a, 'b> {
         } else {
             icons::TOGGLE_OFF
         };
-        let tint = if self.hovered(r) {
-            colors::PLAIN
-        } else if on {
-            colors::ON
-        } else {
-            colors::MUTED
-        };
-        self.painter.stretch(id, r.x, r.y, r.w, r.h, tint);
+        self.painter.stretch(id, r.x, r.y, r.w, r.h, colors::PLAIN);
+        if self.hovered(r) {
+            let pad = (2.0 * self.scale).round();
+            self.frame(
+                Rect {
+                    x: r.x - pad,
+                    y: r.y - pad,
+                    w: r.w + pad * 2.0,
+                    h: r.h + pad * 2.0,
+                },
+                icons::FRAME_SMALL,
+            );
+        }
         clicked
     }
 
     /// Переключатель, прижатый к правому краю строки, вместе с подписью слева.
     fn switch_row(&mut self, r: Rect, label: &str, on: bool) -> bool {
+        self.switch_row_note(r, label, "", colors::TEXT, on)
+    }
+
+    /// То же, но с приписком своего цвета сразу за подписью.
+    fn switch_row_note(
+        &mut self,
+        r: Rect,
+        label: &str,
+        note: &str,
+        note_color: u32,
+        on: bool,
+    ) -> bool {
         self.row_bg(r);
         let pad = (PAD * self.scale).round();
         self.painter
             .text_left(r.x + pad, r.y, r.h, label, colors::TEXT);
+        if !note.is_empty() {
+            let after = r.x + pad + self.painter.measure(label);
+            self.painter.text_left(after, r.y, r.h, note, note_color);
+        }
         let size = (TOGGLE * self.scale).round();
         let knob = Rect {
             x: r.x + r.w - size - pad,
@@ -330,6 +373,7 @@ pub fn build(
     screen: (f32, f32),
     ui_scale: f32,
     own_cursor: bool,
+    frames: u32,
 ) -> Frame {
     // Растём вместе с интерфейсом игры: масштаб — её собственная настройка.
     // Чуть плотнее родного: у нас строки текста, а не ряды ячеек, и в один
@@ -345,6 +389,7 @@ pub fn build(
         painter,
         input,
         scale,
+        frames,
         over_ui: false,
         hover_item: 0,
     };
@@ -448,21 +493,33 @@ pub fn build(
         r
     };
 
-    let (auto_fish, quick_stack, auto_potions, enemies, cast, free, potions) = state::with(|s| {
-        (
-            s.auto_fish,
-            s.quick_stack,
-            s.auto_potions,
-            s.pull_enemy_spawns,
-            s.status.bobber_cast,
-            s.status.free_slots,
-            s.potions,
-        )
-    })
-    .unwrap_or((false, true, false, false, false, -1, [false; 3]));
+    let (auto_fish, quick_stack, auto_potions, enemies, cast, aim, free, potions) =
+        state::with(|s| {
+            (
+                s.auto_fish,
+                s.quick_stack,
+                s.auto_potions,
+                s.pull_enemy_spawns,
+                s.status.bobber_cast,
+                s.status.aim,
+                s.status.free_slots,
+                s.potions,
+            )
+        })
+        .unwrap_or((false, true, false, false, false, None, -1, [false; 3]));
 
+    // Точка заброса важна настолько, что выносится прямо в подпись:
+    // пока она не запомнена, автомат ничего не делает и молча ждёт.
     let r = next_row(&mut cursor);
-    if layout.switch_row(r, "Авторыбалка", auto_fish) {
+    let (note, note_color) = match (auto_fish, aim) {
+        (false, _) => (String::new(), colors::TEXT),
+        (true, None) => (
+            " (жду первого броска удочки)".to_string(),
+            colors::RARE_GREEN,
+        ),
+        (true, Some((ax, ay))) => (format!(" (зафиксировано {ax}:{ay})"), colors::RARE_ORANGE),
+    };
+    if layout.switch_row_note(r, "Авторыбалка", &note, note_color, auto_fish) {
         state::with(|s| {
             s.auto_fish = !s.auto_fish;
             s.dirty = true;
@@ -488,7 +545,7 @@ pub fn build(
     }
 
     // --- статус поплавка ---------------------------------------------------
-    // Тот же кружок, что у переключателей, но кликать по нему нечего.
+    // Та же звёздочка, что у переключателей, но кликать по ней нечего.
     let r = next_row(&mut cursor);
     layout.row_bg(r);
     layout
@@ -507,7 +564,7 @@ pub fn build(
         (r.y + (r.h - size) * 0.5).round(),
         size,
         size,
-        if cast { colors::ON } else { colors::MUTED },
+        colors::PLAIN,
     );
     layout.painter.text_right(
         r.x,
@@ -791,30 +848,61 @@ fn filter_window(
     }
 }
 
-/// Строка поиска: значок слева, набранное посередине, крестик справа —
-/// как в меню дублирования. Сам ввод разбирает игра, см. `input::edit_text`;
-/// здесь только фокус и отрисовка.
+/// Строка поиска, устроенная как в бестиарии и меню дублирования: слева
+/// отдельная кнопка со значком, справа от неё поле. Обе берут наведение и
+/// фокус золотой рамкой — это готовые картинки игры, `Button_Search_Border`
+/// и `Button_Wide_Border`. Сам ввод разбирает игра, см. `input::edit_text`.
 fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
-    layout.row_bg(r);
-    let pad = (PAD * 0.5 * scale).round();
-    let icon = (r.h - pad * 2.0).round();
+    let gap = (GAP * 0.5 * scale).round();
+    let button = Rect {
+        x: r.x,
+        y: r.y,
+        w: r.h,
+        h: r.h,
+    };
+    let field = Rect {
+        x: r.x + button.w + gap,
+        y: r.y,
+        w: r.w - button.w - gap,
+        h: r.h,
+    };
 
-    // Значок поиска — он же кнопка постановки курсора в строку.
+    // --- кнопка со значком -------------------------------------------------
+    layout.row_bg(button);
+    let pad = (PAD * 0.4 * scale).round();
+    let icon = (button.h - pad * 2.0).round();
     layout.painter.stretch(
         icons::SEARCH,
-        r.x + pad,
-        r.y + pad,
+        button.x + pad,
+        button.y + pad,
         icon,
         icon,
         colors::PLAIN,
     );
+    let over_button = layout.hovered(button);
+    if layout.hit(button) {
+        ui.search_focus = true;
+    }
+    if over_button || ui.search_focus {
+        layout.frame(button, icons::FRAME_SMALL);
+    }
+
+    // --- само поле ---------------------------------------------------------
+    layout.row_bg(field);
+    if layout.input.clicked && layout.hovered(field) {
+        ui.search_focus = true;
+    }
+    let _ = layout.hit(field);
+    if ui.search_focus || layout.hovered(field) {
+        layout.frame(field, icons::FRAME_WIDE);
+    }
 
     // Крестик стирает набранное; появляется, только когда есть что стирать.
-    let mut text_w = r.w - icon - pad * 3.0;
+    let mut text_w = field.w - pad * 2.0;
     if !ui.search.is_empty() {
         let cancel = Rect {
-            x: r.x + r.w - icon - pad,
-            y: r.y + pad,
+            x: field.x + field.w - icon - pad,
+            y: field.y + pad,
             w: icon,
             h: icon,
         };
@@ -838,17 +926,14 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
         text_w -= icon + pad;
     }
 
-    // Клик по строке ставит курсор, клик мимо — снимает.
-    if layout.input.clicked {
-        ui.search_focus = layout.hovered(r);
-    }
-    let _ = layout.hit(r);
-
-    let text_x = r.x + icon + pad * 2.0;
-    if ui.search.is_empty() && !ui.search_focus {
+    // Подсказка стоит, пока не начали набирать, — и при курсоре в строке тоже.
+    let text_x = field.x + pad * 2.0;
+    let mut pen = text_x;
+    if ui.search.is_empty() {
         layout
             .painter
-            .text_left(text_x, r.y, r.h, "Поиск по названию", colors::MUTED);
+            .text_left(pen, field.y, field.h, SEARCH_HINT, colors::MUTED);
+        pen += layout.painter.measure(SEARCH_HINT);
     } else {
         // Длинную строку показываем хвостом: набирают-то в конце.
         let mut shown = ui.search.as_str();
@@ -858,18 +943,21 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
         }
         layout
             .painter
-            .text_left(text_x, r.y, r.h, shown, colors::TEXT);
-        if ui.search_focus {
-            let caret = text_x + layout.painter.measure(shown) + (2.0 * scale);
-            let line = (r.h * 0.55).round();
-            layout.painter.rect(
-                caret.round(),
-                (r.y + (r.h - line) * 0.5).round(),
-                (2.0 * scale).round().max(1.0),
-                line,
-                colors::TEXT,
-            );
-        }
+            .text_left(pen, field.y, field.h, shown, colors::TEXT);
+        pen += layout.painter.measure(shown);
+    }
+
+    // Мигающая палочка: игра моргает своей от `Main.textBlinkerState`,
+    // но до неё тянуться незачем — период тот же, на глаз не отличить.
+    if ui.search_focus && layout.blink() {
+        let line = (field.h * 0.55).round();
+        layout.painter.rect(
+            (pen + 2.0 * scale).round(),
+            (field.y + (field.h - line) * 0.5).round(),
+            (2.0 * scale).round().max(1.0),
+            line,
+            colors::TEXT,
+        );
     }
 }
 

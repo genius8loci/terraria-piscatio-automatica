@@ -31,6 +31,7 @@ pub const PANEL: i32 = -3;
 pub const PANEL_BORDER: i32 = -4;
 pub const INNER_PANEL: i32 = -5;
 pub const SLOT: i32 = -6;
+/// Переключатели — звёздочки ранга из бестиария: тусклая и золотая.
 pub const TOGGLE_OFF: i32 = -8;
 pub const TOGGLE_ON: i32 = -9;
 pub const BAR_TRACK: i32 = -10;
@@ -52,12 +53,18 @@ pub const SEARCH_CANCEL: i32 = -16;
 /// пикселям, как рисует свою графику игра.
 pub const CHEVRON_UP: i32 = -17;
 pub const CHEVRON_DOWN: i32 = -18;
+/// Золотые рамки наведения и фокуса: квадратная под кнопку и широкая
+/// под строку. Обе с прозрачной серединой, так что кладутся поверх.
+pub const FRAME_SMALL: i32 = -19;
+pub const FRAME_WIDE: i32 = -20;
 
 /// Ширина рамки при девятичастной нарезке, в пикселях исходной текстуры.
 /// Для панели это раскладка самой игры: 12 + 4 + 12 = 28.
 pub const PANEL_INSET: f32 = 12.0;
 pub const INNER_INSET: f32 = 8.0;
 pub const BAR_INSET: f32 = 6.0;
+/// Уголки золотых рамок: у обеих скругление в шесть пикселей.
+pub const FRAME_INSET: f32 = 6.0;
 
 /// Что взять из `Content/Images`: id, путь без расширения, вырезка.
 const UI_ASSETS: &[(i32, &str, Option<[u32; 4]>)] = &[
@@ -70,9 +77,11 @@ const UI_ASSETS: &[(i32, &str, Option<[u32; 4]>)] = &[
     (SLOT_HOVER, "Inventory_Back13", None),
     (SEARCH, "UI/Bestiary/Button_Search", None),
     (SEARCH_CANCEL, "UI/SearchCancel", None),
-    // Переключатель из меню настроек: слева кольцо «выкл», справа диск «вкл».
-    (TOGGLE_OFF, "UI/Settings_Toggle", Some([0, 0, 14, 14])),
-    (TOGGLE_ON, "UI/Settings_Toggle", Some([16, 0, 14, 14])),
+    (TOGGLE_OFF, "UI/Bestiary/Icon_Rank_Dim", None),
+    (TOGGLE_ON, "UI/Bestiary/Icon_Rank_Light", None),
+    // Золотые рамки из бестиария: ими игра показывает наведение и фокус.
+    (FRAME_SMALL, "UI/Bestiary/Button_Search_Border", None),
+    (FRAME_WIDE, "UI/Bestiary/Button_Wide_Border", None),
     (BAR_TRACK, "UI/Scrollbar", None),
     (BAR_HANDLE, "UI/ScrollbarInner", None),
 ];
@@ -266,27 +275,37 @@ fn chevron_block(up: bool) -> xnb::Image {
     }
 }
 
-/// Косой крест. Белый — цвет ему задаётся при отрисовке.
+/// Косой крест с тёмной обводкой — так нарисована вся мелкая графика игры:
+/// светлое ядро в один-два пикселя и контур вокруг. Без контура крест
+/// теряется на пёстрых иконках.
+///
+/// Ядро белое, цвет ему задаётся при отрисовке; обводка своя, чёрная.
 fn cross_block() -> xnb::Image {
     const SIZE: u32 = 24;
-    /// Полутолщина штриха: расстояние от диагонали, где ещё рисуем.
-    /// Тонко нарочно — под крестиком должно быть видно сам предмет.
-    const HALF: f32 = 1.2;
+    /// Полутолщина ядра и всего штриха вместе с обводкой, в пикселях.
+    const CORE: f32 = 1.1;
+    const EDGE: f32 = 2.3;
 
     let mut pixels = vec![0u32; (SIZE * SIZE) as usize];
     for y in 0..SIZE {
         for x in 0..SIZE {
             let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            // Расстояние до обеих диагоналей квадрата.
+            // Расстояние до ближней из двух диагоналей квадрата.
             let down = (fx - fy).abs();
             let up = (fx + fy - SIZE as f32).abs();
             let near = down.min(up) / std::f32::consts::SQRT_2;
-            if near <= HALF {
-                // Край штриха гасим по прозрачности: получается ровнее,
-                // чем ступеньки, и на любом масштабе выглядит опрятно.
-                let alpha = ((HALF - near).min(1.0) * 255.0) as u32;
-                pixels[(y * SIZE + x) as usize] = (alpha << 24) | 0x00FF_FFFF;
+            if near > EDGE {
+                continue;
             }
+            let pixel = if near <= CORE {
+                0xFFFF_FFFF
+            } else {
+                // Обводка гаснет к краю: ступеньки на масштабе выглядят
+                // грубее, чем мягкий край.
+                let alpha = ((EDGE - near).min(1.0) * 255.0) as u32;
+                alpha << 24
+            };
+            pixels[(y * SIZE + x) as usize] = pixel;
         }
     }
     xnb::Image {

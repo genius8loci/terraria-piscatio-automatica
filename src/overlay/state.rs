@@ -33,6 +33,8 @@ pub struct Status {
     pub connected: String,
     pub fishing: String,
     pub bobber_cast: bool,
+    /// Куда забрасываем. `None` — ждём, пока игрок бросит удочку сам.
+    pub aim: Option<(i32, i32)>,
     pub free_slots: i32,
     pub bait: i32,
     pub detour_ready: bool,

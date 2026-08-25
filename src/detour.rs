@@ -177,6 +177,13 @@ pub fn install_cursor(address: usize) -> bool {
     true
 }
 
+/// Стоит ли детур `DrawCursor`. Пока стоит, свой курсор рисовать нельзя:
+/// игра рисует его сама, просто не всегда через `DrawCursor` — например,
+/// под Shift она уходит в ветку `cursorOverride` и рисует напрямую.
+pub fn cursor_is_active() -> bool {
+    CURSOR_ACTIVE.load(Ordering::Relaxed)
+}
+
 pub fn uninstall_cursor() {
     if !CURSOR_INSTALLED.swap(false, Ordering::SeqCst) {
         return;

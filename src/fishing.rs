@@ -87,15 +87,25 @@ impl Fishing {
     /// Ведёт время рыбалки: счёт идёт от включения, а не от инжекта.
     /// Выключили — время замирает на последнем значении; включили снова —
     /// начинается заново.
+    ///
+    /// Заодно на каждом запуске забывается точка заброса. Иначе неудачный
+    /// первый бросок запоминался навсегда, и автомат долбил в ту же
+    /// неудачную точку даже после перезапуска.
     fn track_session(&mut self) {
         let enabled = self.enabled();
         match (enabled, self.session_start) {
             (true, None) => {
                 self.session_start = Some(Instant::now());
                 self.session_seconds = 0;
+                self.aim = None;
+                self.stopped = None;
+                log!("рыбалка включена: жду первый заброс вручную");
             }
             (true, Some(start)) => self.session_seconds = start.elapsed().as_secs(),
-            (false, Some(_)) => self.session_start = None,
+            (false, Some(_)) => {
+                self.session_start = None;
+                self.aim = None;
+            }
             (false, None) => {}
         }
     }
@@ -208,6 +218,7 @@ impl Fishing {
         };
         state::with(|s| {
             s.status.fishing = status;
+            s.status.aim = self.aim;
             s.stats.seconds = self.session_seconds;
             s.stats.caught = self.pulls;
             s.stats.skipped = self.skips;

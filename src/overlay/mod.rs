@@ -91,6 +91,8 @@ pub mod colors {
     pub const RARE_GREEN: u32 = 0xFF_96FF96;
     /// Красный, редкость 4 — им перечёркиваем отвергнутое.
     pub const RARE_RED: u32 = 0xFF_FF9696;
+    /// Оранжевый, редкость 3.
+    pub const RARE_ORANGE: u32 = 0xFF_FFC896;
     pub const TEXT: u32 = 0xFF_FFFFFF;
     pub const MUTED: u32 = 0xFF_A2A8CE;
     pub const VALUE: u32 = 0xFF_FFE745;
@@ -559,10 +561,16 @@ unsafe fn present(
 
         // Обычно панель рисует детур `DrawCursor` — там она ложится под
         // курсор игры. Сюда доходим, только если детур не встал или игра
-        // в этом кадре курсор не рисовала: тогда рисуем сами, вместе с ним.
+        // в этом кадре курсор не рисовала.
+        //
+        // Свой курсор дорисовываем, только когда детура нет вовсе. Если он
+        // стоит, но не сработал, — игра всё равно нарисовала курсор, просто
+        // не через `DrawCursor`: так она делает под Shift и вообще всегда,
+        // когда `Main.cursorOverride != -1`. Свой поверх её собственного
+        // и вылезал белой стрелкой.
         let already = DREW_IN_CURSOR.swap(false, Ordering::SeqCst);
         if !already && shown && !BROKEN.load(Ordering::Relaxed) {
-            guarded(device, true);
+            guarded(device, !crate::detour::cursor_is_active());
         }
     }
 
@@ -1210,6 +1218,7 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
             screen,
             ui_scale(),
             own_cursor,
+            crate::FRAME.load(Ordering::Relaxed),
         )
     };
 
