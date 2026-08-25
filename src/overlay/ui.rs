@@ -11,9 +11,18 @@
 use super::state::{self, Mark};
 use super::{Painter, colors, icons};
 
+/// Заголовок панели собирается из `Cargo.toml`, чтобы не разъезжаться
+/// со свойствами самой DLL: там те же `description` и `authors`.
+const TITLE: &str = concat!(
+    env!("CARGO_PKG_DESCRIPTION"),
+    " by ",
+    env!("CARGO_PKG_AUTHORS")
+);
+
 /// Базовые размеры при масштабе 1.0; всё остальное — умножением.
 const ROW_H: f32 = 34.0;
-const PANEL_W: f32 = 560.0;
+/// Ширина подобрана под заголовок: он длиннее любой строки в панели.
+const PANEL_W: f32 = 640.0;
 const PAD: f32 = 12.0;
 const GAP: f32 = 6.0;
 const ARROW_W: f32 = 64.0;
@@ -21,9 +30,13 @@ const ARROW_H: f32 = 26.0;
 /// Переключатель рисуется в натуральную величину текстуры: 14 пикселей.
 const TOGGLE: f32 = 14.0;
 const SLOT: f32 = 46.0;
-/// Поля от края экрана у окна фильтра, которое тянется во всю ширину.
+/// Поле от нижнего края экрана, ниже которого окно фильтра не растёт.
 const SCREEN_MARGIN: f32 = 24.0;
 const BAR_W: f32 = 20.0;
+/// Высота, нужная при масштабе 1.0, чтобы уместились основное окно,
+/// шапка фильтра и хотя бы один ряд ячеек. Ниже этого масштаб приходится
+/// сбавлять, иначе фильтр уезжает за нижний край экрана.
+const NEEDED_HEIGHT: f32 = 580.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -217,9 +230,16 @@ pub fn build(
     ui: &mut UiState,
     input: Input,
     screen: (f32, f32),
+    ui_scale: f32,
     own_cursor: bool,
 ) -> bool {
-    let scale = (screen.1 / 1080.0).clamp(0.65, 2.5);
+    // Растём вместе с интерфейсом игры: масштаб — её собственная настройка.
+    // Но не больше, чем позволяет высота экрана: иначе окно фильтра уедет
+    // за нижний край. На обычных разрешениях предел не срабатывает.
+    let scale = ui_scale
+        .clamp(0.5, 3.0)
+        .min(screen.1 / NEEDED_HEIGHT)
+        .max(0.5);
     painter.scale = scale;
     let mut layout = Layout {
         painter,
@@ -277,9 +297,14 @@ pub fn build(
     let inner_w = main.w - pad * 2.0;
     let mut cursor = main.y + pad;
 
-    layout
-        .painter
-        .text(inner_x, cursor, "Terraria Auto Fisher", colors::TITLE);
+    // Ширина панели подобрана под полный заголовок, но шрифт у игры
+    // пропорциональный: если он вдруг не влез, оставляем одно название.
+    let title = if layout.painter.measure(TITLE) <= inner_w {
+        TITLE
+    } else {
+        env!("CARGO_PKG_DESCRIPTION")
+    };
+    layout.painter.text(inner_x, cursor, title, colors::TITLE);
     cursor += row_h;
 
     let next_row = |cursor: &mut f32| -> Rect {
@@ -454,7 +479,7 @@ pub fn build(
 
     let below = main.y + main.h + GAP * 2.0 * scale;
     match ui.tab {
-        Tab::Filter => filter_window(&mut layout, ui, below, screen, scale),
+        Tab::Filter => filter_window(&mut layout, ui, x, below, panel_w, screen.1, scale),
         Tab::Stats => stats_window(&mut layout, x, below, panel_w, scale),
         Tab::None => {}
     }
@@ -465,9 +490,19 @@ pub fn build(
     layout.over_ui
 }
 
-/// Окно фильтра во всю ширину экрана: колонок столько, сколько влезает,
-/// остаток уходит в поля, чтобы сетка стояла ровно по центру.
-fn filter_window(layout: &mut Layout, ui: &mut UiState, y: f32, screen: (f32, f32), scale: f32) {
+/// Окно фильтра ровно под основным и той же ширины. Колонок столько,
+/// сколько влезает, остаток уходит в поля, чтобы сетка стояла по центру;
+/// строки, не поместившиеся в экран, — под прокрутку.
+#[allow(clippy::too_many_arguments)]
+fn filter_window(
+    layout: &mut Layout,
+    ui: &mut UiState,
+    x: f32,
+    y: f32,
+    panel_w: f32,
+    screen_h: f32,
+    scale: f32,
+) {
     let items = state::with(|s| s.fishable.clone()).unwrap_or_default();
     let pad = (PAD * scale).round();
     let gap = (GAP * scale).round();
@@ -475,11 +510,9 @@ fn filter_window(layout: &mut Layout, ui: &mut UiState, y: f32, screen: (f32, f3
     let row_h = (ROW_H * scale).round();
     let margin = (SCREEN_MARGIN * scale).round();
 
-    let panel_w = (screen.0 - margin * 2.0).floor();
-    let x = margin;
     // Сколько строк вообще можно показать, чтобы окно влезло в экран.
     let head_h = pad + row_h * 2.0 + gap;
-    let available = (screen.1 - y - margin - head_h - pad).max(cell);
+    let available = (screen_h - y - margin - head_h - pad).max(cell);
     let fits = ((available + gap) / (cell + gap)).floor().max(1.0) as usize;
 
     // Колонки считаем дважды: полоса прокрутки съедает ширину, но нужна она

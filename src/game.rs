@@ -57,6 +57,8 @@ pub struct Game {
     f_mouse_x: Field,
     f_mouse_y: Field,
     f_fish_drops: Field,
+    /// `Main.itemAnimations` — по элементу на предмет, `null` у неподвижных.
+    f_item_animations: Field,
 
     /// Для получения адреса JIT-кода `Player.ItemCheck`.
     m_item_check: Method,
@@ -110,6 +112,7 @@ impl Game {
             f_mouse_x: main.field("mouseX")?,
             f_mouse_y: main.field("mouseY")?,
             f_fish_drops: main.field("FishDropsDB")?,
+            f_item_animations: main.field("itemAnimations")?,
             m_item_check: player.method("ItemCheck")?,
             m_draw_cursor: main.method("DrawCursor")?,
             m_get_method_handle: method_base.method("get_MethodHandle")?,
@@ -205,6 +208,30 @@ impl Game {
         pointer
             .as_ptr()
             .ok_or_else(|| crate::clr::err("GetFunctionPointer вернул не указатель"))
+    }
+
+    /// Сколько кадров в картинке предмета.
+    ///
+    /// У анимированных предметов `Content/Images/Item_<id>.xnb` — не один
+    /// спрайт, а лента кадров сверху вниз; сколько их, знает только игра,
+    /// в `Main.itemAnimations[id].FrameCount`. У неподвижных там `null`,
+    /// и кадр ровно один.
+    pub fn item_frames(&self, item: i32) -> Result<u32> {
+        let animations = self.f_item_animations.get_static()?;
+        if animations.is_null() || item < 0 || item >= array_len(&animations)? {
+            return Ok(1);
+        }
+        let animation = array_get(&animations, item)?;
+        if animation.is_null() {
+            return Ok(1);
+        }
+        let frames = self
+            .type_of(&animation)?
+            .field("FrameCount")?
+            .get(&animation)?
+            .as_int()
+            .unwrap_or(1);
+        Ok(frames.max(1) as u32)
     }
 
     /// Тип объекта в рантайме — через `Object.GetType()`.

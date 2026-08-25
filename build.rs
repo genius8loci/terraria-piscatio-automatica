@@ -10,19 +10,24 @@ fn main() {
     }
 
     let version = env!("CARGO_PKG_VERSION");
+    // Один автор, поэтому строку берём как есть: Cargo склеивает нескольких
+    // через двоеточие, а у нас оно уже внутри ссылки на телеграм.
     let authors = env!("CARGO_PKG_AUTHORS");
     let description = env!("CARGO_PKG_DESCRIPTION");
     let repository = env!("CARGO_PKG_REPOSITORY");
+    let license = env!("CARGO_PKG_LICENSE");
+    // Тот же заголовок, что панель рисует у себя сверху.
+    let title = format!("{description} by {authors}");
 
     let mut resource = winresource::WindowsResource::new();
     resource
         .set("ProductName", "piscatio")
-        .set("FileDescription", description)
+        .set("FileDescription", &title)
         .set("CompanyName", authors)
-        .set("LegalCopyright", "MIT. (c) Genius Loci")
+        .set("LegalCopyright", &format!("{license}. (c) {authors}"))
         .set("InternalName", "piscatio")
         .set("OriginalFilename", "piscatio.dll")
-        .set("Comments", &format!("{description} — {repository}"))
+        .set("Comments", &format!("{title} — {repository}"))
         .set("FileVersion", version)
         .set("ProductVersion", version);
 

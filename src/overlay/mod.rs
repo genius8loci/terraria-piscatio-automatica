@@ -140,6 +140,8 @@ static MOUSE_Y: AtomicI32 = AtomicI32::new(-1);
 static MOUSE_CLICK: AtomicBool = AtomicBool::new(false);
 /// Курсор над нашим окном — результат последней отрисовки.
 static OVER_UI: AtomicBool = AtomicBool::new(false);
+/// Масштаб интерфейса игры, битами `f32`: атомика для плавающих нет.
+static UI_SCALE: AtomicU32 = AtomicU32::new(0);
 /// Отрисовка уронила панику: дальше не рисуем, но игру не роняем.
 static BROKEN: AtomicBool = AtomicBool::new(false);
 static ICON_TEXTURE: AtomicUsize = AtomicUsize::new(0);
@@ -149,8 +151,8 @@ static STATE_BLOCK: AtomicUsize = AtomicUsize::new(0);
 /// поэтому колонки выравниваем координатами, а не пробелами.
 static FONT: OnceLock<Option<GameFont>> = OnceLock::new();
 static ICONS: Mutex<Option<IconAtlas>> = Mutex::new(None);
-/// Набор предметов, под который собран текущий атлас.
-static ICON_ITEMS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// Набор предметов, под который собран текущий атлас: id и число кадров.
+static ICON_ITEMS: Mutex<Vec<(i32, u32)>> = Mutex::new(Vec::new());
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -493,10 +495,13 @@ unsafe fn present(
             crate::log!("оверлей: первый кадр перехвачен, рендер работает");
         }
 
-        // Ввод глазами игры — единственное место, где мы трогаем CLR
-        // из кадра. Детур курсора читает уже готовые значения.
+        // Ввод и масштаб глазами игры — единственное место, где мы трогаем
+        // CLR из кадра. Детур курсора читает уже готовые значения.
         let (mx, my, down) = crate::input::cursor().unwrap_or((-1, -1, false));
         feed_input(mx, my, down);
+        if let Some(scale) = crate::input::ui_scale() {
+            UI_SCALE.store(scale.to_bits(), Ordering::Relaxed);
+        }
 
         // Ресурсы заводим только здесь. В детуре курсора мы внутри чужой
         // открытой сцены, и создавать там текстуры незачем: `Present`
@@ -504,8 +509,7 @@ unsafe fn present(
         let shown = SHOW_UI.load(Ordering::Relaxed);
         if shown {
             prepare(device);
-        }
-        if !shown {
+        } else {
             OVER_UI.store(false, Ordering::Relaxed);
             // Иначе нажатие, сделанное при скрытой панели, сработает,
             // как только её покажут.
@@ -513,7 +517,9 @@ unsafe fn present(
         }
         // Пока курсор над окном, игра не должна считать клик игровым.
         // Значение посчитал детур курсора чуть раньше в этом же кадре.
-        crate::input::set_mouse_interface(OVER_UI.load(Ordering::Relaxed));
+        if OVER_UI.load(Ordering::Relaxed) {
+            crate::input::claim_mouse_interface();
+        }
 
         // Обычно панель рисует детур `DrawCursor` — там она ложится под
         // курсор игры. Сюда доходим, только если детур не встал или игра
@@ -899,7 +905,8 @@ static MOUSE_WAS_DOWN: AtomicBool = AtomicBool::new(false);
 static ICONS_STALE: AtomicBool = AtomicBool::new(false);
 
 /// Просит пересобрать атлас иконок под новый набор предметов.
-pub fn set_icon_items(items: Vec<i32>) {
+/// Второе число в паре — сколько кадров анимации в картинке предмета.
+pub fn set_icon_items(items: Vec<(i32, u32)>) {
     if let Ok(mut slot) = ICON_ITEMS.lock() {
         if *slot == items {
             return;
@@ -965,6 +972,27 @@ pub(crate) fn feed_input(x: i32, y: i32, down: bool) {
     } else if !down {
         MOUSE_WAS_DOWN.store(false, Ordering::Relaxed);
     }
+}
+
+/// Масштаб интерфейса игры. Ноль означает «ещё не читали» — до подключения
+/// к игре и в пробнике; тогда считаем, что масштаб единичный.
+pub(crate) fn ui_scale() -> f32 {
+    let bits = UI_SCALE.load(Ordering::Relaxed);
+    if bits == 0 {
+        return 1.0;
+    }
+    let scale = f32::from_bits(bits);
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// Задаёт масштаб интерфейса вручную — нужно пробнику, у которого игры нет.
+#[allow(dead_code)]
+pub(crate) fn set_ui_scale(scale: f32) {
+    UI_SCALE.store(scale.to_bits(), Ordering::Relaxed);
 }
 
 /// Зовётся из детура `Main.DrawCursor`, с игрового потока и внутри кадра.
@@ -1054,7 +1082,14 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
             return;
         };
         let ui_state = guard.get_or_insert_with(ui::UiState::default);
-        ui::build(&mut painter, ui_state, input, screen, own_cursor)
+        ui::build(
+            &mut painter,
+            ui_state,
+            input,
+            screen,
+            ui_scale(),
+            own_cursor,
+        )
     };
 
     OVER_UI.store(over_ui, Ordering::Relaxed);

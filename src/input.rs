@@ -44,6 +44,10 @@ struct Handles {
     raw_mouse_x: Option<Field>,
     raw_mouse_y: Option<Field>,
     mouse_left: Field,
+    /// `Main._uiScaleUsed` — масштаб интерфейса, выбранный игроком.
+    /// Свойство `Main.UIScale` только его и возвращает, а до приватного
+    /// поля дотянуться проще, чем до геттера.
+    ui_scale: Option<Field>,
     control_use_item: Field,
     mouse_interface: Field,
 }
@@ -165,6 +169,9 @@ fn attach() -> Option<Handles> {
         raw_mouse_x: raw("_originalMouseX"),
         raw_mouse_y: raw("_originalMouseY"),
         mouse_left: main.field("mouseLeft").ok()?,
+        ui_scale: main
+            .field_flags("_uiScaleUsed", BINDING_NON_PUBLIC | BINDING_STATIC)
+            .ok(),
         control_use_item: player.field("controlUseItem").ok()?,
         mouse_interface: player.field("mouseInterface").ok()?,
         _clr: clr,
@@ -240,13 +247,25 @@ pub fn cursor() -> Option<(i32, i32, bool)> {
     Some((x, y, down))
 }
 
+/// Масштаб интерфейса, выставленный игроком в настройках. Ровно на столько
+/// игра увеличивает свой UI, и наша панель должна расти вместе с ним.
+pub fn ui_scale() -> Option<f32> {
+    handles()?.ui_scale.as_ref()?.get_static().ok()?.as_float()
+}
+
 /// Курсор над нашим окном — сообщаем игре, чтобы клик не ушёл в мир.
-pub fn set_mouse_interface(over: bool) {
+///
+/// Только выставляем флаг, никогда не снимаем. `Player.mouseInterface` —
+/// общий на всех: игра гасит его один раз за кадр в `Main.DoUpdate`, а потом
+/// каждый, кто держит под курсором свою кнопку, поднимает заново. Записать
+/// туда `false` — значит стереть чужое «да», и клик по кнопке торговца
+/// уходит в мир вместо магазина.
+pub fn claim_mouse_interface() {
     let Some(handles) = handles() else {
         return;
     };
     let Some(player) = handles.local_player() else {
         return;
     };
-    let _ = handles.mouse_interface.set(&player, Var::boolean(over));
+    let _ = handles.mouse_interface.set(&player, Var::boolean(true));
 }

@@ -94,8 +94,10 @@ impl IconAtlas {
 }
 
 /// Собирает атлас: сначала служебная графика, потом иконки предметов.
+/// У каждого предмета — число кадров анимации: у неподвижных единица,
+/// у остальных в файле лежит лента кадров сверху вниз, и берём верхний.
 /// Отсутствующие или слишком большие иконки пропускаются молча.
-pub fn build(content: &Path, items: &[i32]) -> Option<IconAtlas> {
+pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
     let mut loaded: Vec<(i32, xnb::Image)> = Vec::with_capacity(items.len() + UI_ASSETS.len() + 1);
 
     loaded.push((WHITE, white_block()));
@@ -114,7 +116,7 @@ pub fn build(content: &Path, items: &[i32]) -> Option<IconAtlas> {
         }
     }
 
-    for &id in items {
+    for &(id, frames) in items {
         let path = content.join(format!("Item_{id}.xnb"));
         let Some(image) = xnb::load_texture(&path) else {
             continue;
@@ -122,7 +124,13 @@ pub fn build(content: &Path, items: &[i32]) -> Option<IconAtlas> {
         if image.width == 0 || image.height == 0 || image.width > MAX_ICON * 4 {
             continue;
         }
-        loaded.push((id, image));
+        let frame = match frames {
+            0 | 1 => Some(image),
+            n => crop(&image, [0, 0, image.width, image.height / n]),
+        };
+        if let Some(frame) = frame {
+            loaded.push((id, frame));
+        }
     }
     if loaded.is_empty() {
         return None;

@@ -237,6 +237,16 @@ fn load_fishable(game: &Game) {
             // В атлас кладём ещё и зелья: без них ячейки автопитья пустые.
             let mut icons = items.clone();
             icons.extend(crate::game::POTIONS.iter().map(|(item, _, _)| *item));
+            // У анимированных предметов в файле лежит лента кадров: без числа
+            // кадров в ячейку попала бы вся лента (так вылезала Joja Cola).
+            let icons: Vec<(i32, u32)> = icons
+                .into_iter()
+                .map(|id| (id, game.item_frames(id).unwrap_or(1)))
+                .collect();
+            let animated = icons.iter().filter(|(_, frames)| *frames > 1).count();
+            if animated > 0 {
+                log!("анимированных иконок: {animated}");
+            }
             overlay::set_icon_items(icons);
             state::with(|s| s.fishable = items);
         }

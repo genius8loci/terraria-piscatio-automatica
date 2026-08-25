@@ -1,6 +1,6 @@
 [package]
 name = "terraria-piscatio-automatica"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 # Голые функции (`#[unsafe(naked)]` + `naked_asm!`) стабильны с 1.88 —
 # на них держится детур managed-метода.
