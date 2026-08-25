@@ -11,11 +11,16 @@
 use super::state::{self, Mark};
 use super::{Painter, colors, icons};
 
-/// Заголовок панели собирается из `Cargo.toml`, чтобы не разъезжаться
-/// со свойствами самой DLL: там те же `description`, `version` и `authors`.
+// Заголовок панели собирается из `Cargo.toml`, чтобы не разъезжаться
+// со свойствами самой DLL: там те же `description`, `version` и `authors`.
+// Три куска — три цвета, иначе строка сливается в одну кашу.
+const NAME: &str = concat!(env!("CARGO_PKG_DESCRIPTION"), " ");
+const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"), " ");
+const AUTHOR: &str = concat!("by ", env!("CARGO_PKG_AUTHORS"));
+/// Заголовок целиком — по нему считается ширина панели.
 const TITLE: &str = concat!(
     env!("CARGO_PKG_DESCRIPTION"),
-    " ",
+    " v",
     env!("CARGO_PKG_VERSION"),
     " by ",
     env!("CARGO_PKG_AUTHORS")
@@ -35,7 +40,8 @@ const ARROW_W: f32 = 64.0;
 const ARROW_H: f32 = 26.0;
 /// Переключатель рисуется в натуральную величину текстуры: 14 пикселей.
 const TOGGLE: f32 = 14.0;
-const SLOT: f32 = 46.0;
+/// Доля ячейки под крестик «пропускаю».
+const CROSS_SIZE: f32 = 0.7;
 /// Поле от нижнего края экрана, ниже которого окно фильтра не растёт.
 const SCREEN_MARGIN: f32 = 24.0;
 const BAR_W: f32 = 20.0;
@@ -58,6 +64,9 @@ pub struct UiState {
     pub filter_row: usize,
     /// Ползунок прокрутки схвачен: сколько было от его верха до курсора.
     pub drag: Option<f32>,
+    /// Что набрано в строке поиска, и стоит ли в ней курсор.
+    pub search: String,
+    pub search_focus: bool,
 }
 
 impl Default for UiState {
@@ -67,6 +76,8 @@ impl Default for UiState {
             tab: Tab::None,
             filter_row: 0,
             drag: None,
+            search: String::new(),
+            search_focus: false,
         }
     }
 }
@@ -90,6 +101,8 @@ pub struct Frame {
     pub over_ui: bool,
     /// Предмет под курсором; `0` — ничего.
     pub hover_item: i32,
+    /// Курсор стоит в строке поиска: клавиши сейчас про текст.
+    pub typing: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -177,10 +190,39 @@ impl<'a, 'b> Layout<'a, 'b> {
         );
     }
 
-    /// Ячейка инвентаря. Смысл слота показываем сменой текстуры, как игра:
-    /// у неё под избранное и под ячейки монет свои цветные подложки.
-    fn cell(&mut self, r: Rect, id: i32, tint: u32) {
-        self.painter.stretch(id, r.x, r.y, r.w, r.h, tint);
+    /// Ячейка предмета: подложка, иконка и отметка поверх.
+    ///
+    /// Отметки сделаны так же, как их показывает игра. «Беру» — светлая
+    /// рамка `Inventory_Back15`, зелёная: ровно ей игра подсвечивает новые
+    /// предметы в инвентаре и слоты, куда предмет положить можно.
+    /// «Пропускаю» — та же рамка красным, предмет притушен и перечёркнут,
+    /// как недоступное в меню дублирования.
+    fn item_cell(&mut self, r: Rect, item: i32, mark: Mark) {
+        let hovered = self.hovered(r);
+        let (backing, tint) = match mark {
+            Mark::Allow => (icons::SLOT_MARK, colors::RARE_GREEN),
+            Mark::Deny => (icons::SLOT_MARK, colors::RARE_RED),
+            Mark::Neutral if hovered => (icons::SLOT_HOVER, colors::SLOT),
+            Mark::Neutral => (icons::SLOT, colors::SLOT),
+        };
+        self.painter.stretch(backing, r.x, r.y, r.w, r.h, tint);
+        let icon = if mark == Mark::Deny {
+            colors::ICON_DENIED
+        } else {
+            colors::PLAIN
+        };
+        self.painter.icon(item, r.x, r.y, r.w, r.h, icon);
+        if mark == Mark::Deny {
+            let size = (r.w * CROSS_SIZE).round();
+            self.painter.stretch(
+                icons::CROSS,
+                (r.x + (r.w - size) * 0.5).round(),
+                (r.y + (r.h - size) * 0.5).round(),
+                size,
+                size,
+                colors::CROSS,
+            );
+        }
     }
 
     /// Переключатель из меню настроек: кольцо — выключено, диск — включено.
@@ -238,9 +280,12 @@ impl<'a, 'b> Layout<'a, 'b> {
             .sprite(icons::CURSOR, self.input.x, self.input.y, colors::PLAIN);
     }
 
+    /// Кнопка собирается из той же панели, что и окна: `ButtonBacking`
+    /// скруглён заметно мельче, и рядом с окном кнопка на нём смотрелась
+    /// чужой. Разница только в заливке — по ней и видно состояние.
     fn button(&mut self, r: Rect, label: &str, active: bool) -> bool {
         let clicked = self.hit(r);
-        let tint = if active {
+        let fill = if active {
             colors::BUTTON_ACTIVE
         } else if self.hovered(r) {
             colors::BUTTON_HOVER
@@ -248,7 +293,16 @@ impl<'a, 'b> Layout<'a, 'b> {
             colors::BUTTON
         };
         self.painter
-            .nine_slice(icons::BUTTON, r.x, r.y, r.w, r.h, icons::BUTTON_INSET, tint);
+            .nine_slice(icons::PANEL, r.x, r.y, r.w, r.h, icons::PANEL_INSET, fill);
+        self.painter.nine_slice(
+            icons::PANEL_BORDER,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            icons::PANEL_INSET,
+            colors::PANEL_BORDER,
+        );
         self.painter
             .text_centered(r.x, r.y, r.w, r.h, label, colors::TEXT);
         clicked
@@ -317,15 +371,19 @@ pub fn build(
         if own_cursor {
             layout.draw_cursor();
         }
+        ui.search_focus = false;
         return Frame {
             over_ui: layout.over_ui,
             hover_item: 0,
+            typing: false,
         };
     }
 
     let row_h = (ROW_H * scale).round();
     let row_gap = (GAP * 0.5 * scale).round();
-    let slot = (SLOT * scale).round();
+    // Ячейки берём размером ровно с инвентарные: `52 * Main.inventoryScale`,
+    // и без нашего уплотнения — иначе иконки не совпадут с игровыми.
+    let slot = (super::SLOT_TEXTURE_SIZE * super::INVENTORY_SCALE * ui_scale).round();
     let pad = (PAD * scale).round();
     // Заголовок, шесть строк, полка зелий и ряд вкладок.
     let main_h = pad * 2.0 + row_h + (row_h + row_gap) * 6.0 + slot + GAP * scale + row_h;
@@ -341,20 +399,17 @@ pub fn build(
     let inner_w = main.w - pad * 2.0;
     let mut cursor = main.y + pad;
 
-    // Ширина панели подобрана под полный заголовок, но шрифт у игры
-    // пропорциональный: если он вдруг не влез, оставляем одно название.
-    let title = if layout.painter.measure(TITLE) <= inner_w {
-        TITLE
-    } else {
-        concat!(
-            env!("CARGO_PKG_DESCRIPTION"),
-            " ",
-            env!("CARGO_PKG_VERSION")
-        )
-    };
-    layout
-        .painter
-        .text_left(inner_x, cursor, row_h, title, colors::TITLE);
+    // Заголовок в три цвета: название, версия и автор читаются по отдельности.
+    // Цвета — из палитры редкости предметов, чтобы не выдумывать свои.
+    let mut pen = inner_x;
+    for (part, color) in [
+        (NAME, colors::TITLE),
+        (VERSION, colors::RARE_BLUE),
+        (AUTHOR, colors::RARE_PURPLE),
+    ] {
+        layout.painter.text_left(pen, cursor, row_h, part, color);
+        pen += layout.painter.measure(part);
+    }
     cursor += row_h;
 
     let next_row = |cursor: &mut f32| -> Rect {
@@ -479,19 +534,23 @@ pub fn build(
                 s.dirty = true;
             });
         }
-        layout.cell(
-            cell,
-            if on { icons::SLOT_ALLOW } else { icons::SLOT },
-            if on { colors::PLAIN } else { colors::SLOT_OFF },
-        );
-        layout.painter.icon(
-            *item,
-            cell.x,
-            cell.y,
-            cell.w,
-            cell.h,
-            if on { colors::PLAIN } else { colors::ICON_OFF },
-        );
+        // Выбранное зелье помечается той же светлой рамкой, что и предмет,
+        // который берём: одно правило на весь интерфейс.
+        if on {
+            layout.item_cell(cell, *item, Mark::Allow);
+        } else {
+            layout.painter.stretch(
+                icons::SLOT,
+                cell.x,
+                cell.y,
+                cell.w,
+                cell.h,
+                colors::SLOT_OFF,
+            );
+            layout
+                .painter
+                .icon(*item, cell.x, cell.y, cell.w, cell.h, colors::ICON_OFF);
+        }
         slot_x += slot + GAP * scale;
     }
     cursor += slot + GAP * scale;
@@ -527,7 +586,7 @@ pub fn build(
 
     let below = main.y + main.h + GAP * 2.0 * scale;
     match ui.tab {
-        Tab::Filter => filter_window(&mut layout, ui, x, below, panel_w, screen.1, scale),
+        Tab::Filter => filter_window(&mut layout, ui, x, below, panel_w, screen.1, scale, slot),
         Tab::Stats => stats_window(&mut layout, x, below, panel_w, scale),
         Tab::None => {}
     }
@@ -535,9 +594,14 @@ pub fn build(
     if own_cursor {
         layout.draw_cursor();
     }
+    // Курсор в строке поиска имеет смысл только при открытом фильтре.
+    if ui.tab != Tab::Filter {
+        ui.search_focus = false;
+    }
     Frame {
         over_ui: layout.over_ui,
         hover_item: layout.hover_item,
+        typing: ui.search_focus,
     }
 }
 
@@ -553,16 +617,35 @@ fn filter_window(
     panel_w: f32,
     screen_h: f32,
     scale: f32,
+    cell: f32,
 ) {
-    let items = state::with(|s| s.fishable.clone()).unwrap_or_default();
+    // Поиск по именам: их спрашивает у игры рабочий поток при подключении.
+    let query = ui.search.trim().to_lowercase();
+    let items: Vec<i32> = state::with(|s| {
+        if query.is_empty() {
+            return s.fishable.clone();
+        }
+        s.fishable
+            .iter()
+            .filter(|id| {
+                s.names
+                    .iter()
+                    .find(|(name_id, _)| name_id == *id)
+                    .is_some_and(|(_, name)| name.contains(&query))
+            })
+            .copied()
+            .collect()
+    })
+    .unwrap_or_default();
+
     let pad = (PAD * scale).round();
     let gap = (GAP * scale).round();
-    let cell = (SLOT * scale).round();
     let row_h = (ROW_H * scale).round();
     let margin = (SCREEN_MARGIN * scale).round();
 
     // Сколько строк вообще можно показать, чтобы окно влезло в экран.
-    let head_h = pad + row_h * 2.0 + gap;
+    // Шапка: заголовок, строка режима и строка поиска.
+    let head_h = pad + row_h * 3.0 + gap * 2.0;
     let available = (screen_h - y - margin - head_h - pad).max(cell);
     let fits = ((available + gap) / (cell + gap)).floor().max(1.0) as usize;
 
@@ -629,6 +712,16 @@ fn filter_window(
     }
     cursor += row_h + gap;
 
+    // --- строка поиска -----------------------------------------------------
+    let search = Rect {
+        x: inner_x,
+        y: cursor,
+        w: inner_w,
+        h: row_h,
+    };
+    search_field(layout, ui, search, scale);
+    cursor += row_h + gap;
+
     // Сетку центрируем: остаток от деления уходит в поля.
     let used = cols as f32 * (cell + gap) - gap;
     let start = inner_x + ((inner_w - bar - used) * 0.5).floor().max(0.0);
@@ -657,16 +750,7 @@ fn filter_window(
                 s.dirty = true;
             });
         }
-        let backing = match mark {
-            Mark::Allow => icons::SLOT_ALLOW,
-            Mark::Deny => icons::SLOT_DENY,
-            Mark::Neutral if layout.hovered(r) => icons::SLOT_HOVER,
-            Mark::Neutral => icons::SLOT,
-        };
-        layout.cell(r, backing, colors::SLOT);
-        layout
-            .painter
-            .icon(*item, r.x, r.y, r.w, r.h, colors::PLAIN);
+        layout.item_cell(r, *item, mark);
     }
 
     if scrollable {
@@ -679,6 +763,88 @@ fn filter_window(
         scrollbar(layout, track, ui, rows, visible, scale);
     } else {
         ui.filter_row = 0;
+    }
+}
+
+/// Строка поиска: значок слева, набранное посередине, крестик справа —
+/// как в меню дублирования. Сам ввод разбирает игра, см. `input::edit_text`;
+/// здесь только фокус и отрисовка.
+fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
+    layout.row_bg(r);
+    let pad = (PAD * 0.5 * scale).round();
+    let icon = (r.h - pad * 2.0).round();
+
+    // Значок поиска — он же кнопка постановки курсора в строку.
+    layout.painter.stretch(
+        icons::SEARCH,
+        r.x + pad,
+        r.y + pad,
+        icon,
+        icon,
+        colors::PLAIN,
+    );
+
+    // Крестик стирает набранное; появляется, только когда есть что стирать.
+    let mut text_w = r.w - icon - pad * 3.0;
+    if !ui.search.is_empty() {
+        let cancel = Rect {
+            x: r.x + r.w - icon - pad,
+            y: r.y + pad,
+            w: icon,
+            h: icon,
+        };
+        let hovered = layout.hovered(cancel);
+        if layout.hit(cancel) {
+            ui.search.clear();
+            ui.filter_row = 0;
+        }
+        layout.painter.stretch(
+            icons::SEARCH_CANCEL,
+            cancel.x,
+            cancel.y,
+            cancel.w,
+            cancel.h,
+            if hovered {
+                colors::PLAIN
+            } else {
+                colors::MUTED
+            },
+        );
+        text_w -= icon + pad;
+    }
+
+    // Клик по строке ставит курсор, клик мимо — снимает.
+    if layout.input.clicked {
+        ui.search_focus = layout.hovered(r);
+    }
+    let _ = layout.hit(r);
+
+    let text_x = r.x + icon + pad * 2.0;
+    if ui.search.is_empty() && !ui.search_focus {
+        layout
+            .painter
+            .text_left(text_x, r.y, r.h, "Поиск по названию", colors::MUTED);
+    } else {
+        // Длинную строку показываем хвостом: набирают-то в конце.
+        let mut shown = ui.search.as_str();
+        while layout.painter.measure(shown) > text_w && !shown.is_empty() {
+            let cut = shown.char_indices().nth(1).map(|(i, _)| i).unwrap_or(0);
+            shown = &shown[cut..];
+        }
+        layout
+            .painter
+            .text_left(text_x, r.y, r.h, shown, colors::TEXT);
+        if ui.search_focus {
+            let caret = text_x + layout.painter.measure(shown) + (2.0 * scale);
+            let line = (r.h * 0.55).round();
+            layout.painter.rect(
+                caret.round(),
+                (r.y + (r.h - line) * 0.5).round(),
+                (2.0 * scale).round().max(1.0),
+                line,
+                colors::TEXT,
+            );
+        }
     }
 }
 

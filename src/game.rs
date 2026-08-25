@@ -59,6 +59,13 @@ pub struct Game {
     f_fish_drops: Field,
     /// `Main.itemAnimations` — по элементу на предмет, `null` у неподвижных.
     f_item_animations: Field,
+    /// `ItemID.Sets.IsFishingCrate` — таблица «это ящик», по id предмета.
+    f_crate_set: Option<Field>,
+    /// Свой экземпляр `Item` под расспросы об именах, и как его настроить.
+    scratch_item: Option<Var>,
+    m_net_defaults: Option<Method>,
+    m_affix_name: Option<Method>,
+    m_item_clone: Option<Method>,
 
     /// Для получения адреса JIT-кода `Player.ItemCheck`.
     m_item_check: Method,
@@ -113,6 +120,16 @@ impl Game {
             f_mouse_y: main.field("mouseY")?,
             f_fish_drops: main.field("FishDropsDB")?,
             f_item_animations: main.field("itemAnimations")?,
+            // Вложенный тип в рефлексии пишется через плюс. Без него
+            // пропадёт только счётчик ящиков, поэтому ошибку глотаем.
+            f_crate_set: assembly
+                .get_type("Terraria.ID.ItemID+Sets")
+                .ok()
+                .and_then(|sets| sets.field("IsFishingCrate").ok()),
+            scratch_item: None,
+            m_net_defaults: item.method("netDefaults").ok(),
+            m_affix_name: item.method("AffixName").ok(),
+            m_item_clone: item.method("Clone").ok(),
             m_item_check: player.method("ItemCheck")?,
             m_draw_cursor: main.method("DrawCursor")?,
             m_get_method_handle: method_base.method("get_MethodHandle")?,
@@ -232,6 +249,51 @@ impl Game {
             .as_int()
             .unwrap_or(1);
         Ok(frames.max(1) as u32)
+    }
+
+    /// Ящик ли это. Список держит сама игра — `ItemID.Sets.IsFishingCrate`.
+    pub fn is_crate(&self, item: i32) -> bool {
+        let Some(field) = self.f_crate_set.as_ref() else {
+            return false;
+        };
+        let Ok(set) = field.get_static() else {
+            return false;
+        };
+        if set.is_null() || item < 0 || item >= array_len(&set).unwrap_or(0) {
+            return false;
+        }
+        array_get(&set, item)
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Имя предмета так, как его показывает игра. Нужно поиску по фильтру.
+    ///
+    /// Экземпляр `Item` заводим один раз клоном из массива предметов игрока
+    /// и дальше перенастраиваем: `netDefaults` — единственная неперегруженная
+    /// настройка по id, `SetDefaults` на `GetMethod(String)` бросает
+    /// `AmbiguousMatchException`.
+    pub fn item_name(&mut self, id: i32) -> Option<String> {
+        let (net_defaults, affix) = (self.m_net_defaults.as_ref()?, self.m_affix_name.as_ref()?);
+        if self.scratch_item.is_none() {
+            self.scratch_item = Some(self.spare_item()?);
+        }
+        let item = self.scratch_item.as_ref()?;
+        net_defaults.invoke(item, &[Var::int(id)]).ok()?;
+        affix.invoke(item, &[]).ok()?.as_string()
+    }
+
+    /// Свободный экземпляр `Item`: берём копию первой ячейки инвентаря.
+    fn spare_item(&self) -> Option<Var> {
+        let clone = self.m_item_clone.as_ref()?;
+        let player = self.local_player().ok()??;
+        let inventory = self.pl_inventory.get(&player).ok()?;
+        let first = array_get(&inventory, 0).ok()?;
+        if first.is_null() {
+            return None;
+        }
+        clone.invoke(&first, &[]).ok()
     }
 
     /// Тип объекта в рантайме — через `Object.GetType()`.

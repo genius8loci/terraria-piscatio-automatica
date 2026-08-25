@@ -80,6 +80,18 @@ pub fn run(dll_dir: PathBuf) {
     }
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
+        // Пока курсор стоит в строке поиска, клавиши принадлежат ей.
+        // Иначе Delete посреди набора выгрузил бы DLL. Фронт нажатия при
+        // этом всё равно снимаем, чтобы после набора не сработало разом.
+        let typing = overlay::is_typing();
+        if typing {
+            key_unload.pressed();
+            key_ui.pressed();
+            key_toggle.pressed();
+            std::thread::sleep(POLL_INTERVAL);
+            continue;
+        }
+
         // Хоткеи опрашиваем первыми и всегда: выгрузка должна работать
         // даже когда подключиться к игре не удалось.
         if key_unload.pressed() {
@@ -113,7 +125,7 @@ pub fn run(dll_dir: PathBuf) {
             attempts += 1;
             let verbose = attempts == 1 || attempts % 10 == 0;
             match Game::attach(verbose) {
-                Ok(attached) => {
+                Ok(mut attached) => {
                     log!("подключились к игре с попытки {attempts}");
                     let version = attached.version();
                     state::with(|s| {
@@ -130,7 +142,7 @@ pub fn run(dll_dir: PathBuf) {
                     } else {
                         log!("детур DrawCursor отключён в конфиге");
                     }
-                    load_fishable(&attached);
+                    load_fishable(&mut attached);
                     game = Some(attached);
                 }
                 Err(e) => {
@@ -230,7 +242,7 @@ fn pull_config(config: &mut Config) {
 }
 
 /// Список ловимого берём у игры и отдаём оверлею под атлас иконок.
-fn load_fishable(game: &Game) {
+fn load_fishable(game: &mut Game) {
     match game.fishable_items() {
         Ok(items) => {
             log!("ловится предметов: {}", items.len());
@@ -248,7 +260,22 @@ fn load_fishable(game: &Game) {
                 log!("анимированных иконок: {animated}");
             }
             overlay::set_icon_items(icons);
-            state::with(|s| s.fishable = items);
+
+            // Имена нужны поиску в фильтре. Спрашиваем их один раз здесь,
+            // на рабочем потоке: на потоке рендера столько вызовов в CLR
+            // за кадр делать нельзя.
+            let mut names: Vec<(i32, String)> = Vec::with_capacity(items.len());
+            for id in &items {
+                if let Some(name) = game.item_name(*id) {
+                    names.push((*id, name.to_lowercase()));
+                }
+            }
+            log!("имён предметов получено: {}", names.len());
+
+            state::with(|s| {
+                s.fishable = items;
+                s.names = names;
+            });
         }
         Err(e) => log!("список ловимого получить не удалось: {e}"),
     }

@@ -60,6 +60,9 @@ pub struct Shared {
     pub filter: HashMap<i32, Mark>,
     /// Что вообще ловится — берётся из `Main.FishDropsDB`.
     pub fishable: Vec<i32>,
+    /// Имена этих предметов в нижнем регистре — под поиск в фильтре.
+    /// Спрашиваются у игры один раз, на рабочем потоке.
+    pub names: Vec<(i32, String)>,
     pub status: Status,
     pub stats: Stats,
     /// UI что-то переключил — рабочему потоку надо сохранить конфиг.
@@ -77,6 +80,7 @@ impl Default for Shared {
             potions: [true, false, true],
             filter: HashMap::new(),
             fishable: Vec::new(),
+            names: Vec::new(),
             status: Status::default(),
             stats: Stats::default(),
             dirty: false,

@@ -66,11 +66,10 @@ pub mod colors {
     /// «Как есть»: текстура уже нужного цвета.
     pub const PLAIN: u32 = 0xFF_FFFFFF;
 
-    // Умножение может только затемнить, поэтому состояние кнопки показываем
-    // прозрачностью: активная непрозрачна, спокойная просвечивает.
-    pub const BUTTON: u32 = 0xB4_FFFFFF;
-    pub const BUTTON_HOVER: u32 = 0xE6_FFFFFF;
-    pub const BUTTON_ACTIVE: u32 = 0xFF_FFFFFF;
+    // Кнопка — та же панель, но светлее фона окна, чтобы читалась как кнопка.
+    pub const BUTTON: u32 = 0xC8_4A56A8;
+    pub const BUTTON_HOVER: u32 = 0xE6_6472CE;
+    pub const BUTTON_ACTIVE: u32 = 0xFF_7A88E0;
 
     /// Ползунок прокрутки в атласе белый — цвет ему задаём здесь.
     pub const HANDLE: u32 = 0xFF_7C8CD8;
@@ -82,18 +81,39 @@ pub mod colors {
 
     /// Жёлтый заголовков — тот же, что у игры в UI.
     pub const TITLE: u32 = 0xFF_FFE745;
+    // Цвета редкости предметов из `ItemRarityColor`: ими игра красит имена
+    // в подсказках, так что для разбивки заголовка они здесь уместны.
+    /// Голубой, редкость 1.
+    pub const RARE_BLUE: u32 = 0xFF_9696FF;
+    /// Светло-фиолетовый, редкость 6.
+    pub const RARE_PURPLE: u32 = 0xFF_D2A0FF;
+    /// Зелёный, редкость 2 — им подсвечиваем отобранное в фильтре.
+    pub const RARE_GREEN: u32 = 0xFF_96FF96;
+    /// Красный, редкость 4 — им перечёркиваем отвергнутое.
+    pub const RARE_RED: u32 = 0xFF_FF9696;
     pub const TEXT: u32 = 0xFF_FFFFFF;
     pub const MUTED: u32 = 0xFF_A2A8CE;
     pub const VALUE: u32 = 0xFF_FFE745;
     pub const ON: u32 = 0xFF_8CE79A;
     /// Иконка выключенного зелья приглушается.
     pub const ICON_OFF: u32 = 0x99_FFFFFF;
+    /// Отвергнутый предмет тускнеет — как недоступное в меню дублирования.
+    pub const ICON_DENIED: u32 = 0xCC_C4C4D0;
+    /// Крестик поверх него.
+    pub const CROSS: u32 = 0xE6_FF4040;
 }
 
 /// Ячейка инвентаря у игры — текстура в 52 пикселя, и иконка внутри неё
 /// рисуется относительно этого размера. Крупнее 32 пикселей игра ужимает.
 const SLOT_TEXTURE_SIZE: f32 = 52.0;
 const SLOT_ICON_LIMIT: f32 = 32.0;
+/// Насколько игра уменьшает ячейки инвентаря: `Main.inventoryScale`.
+/// Тот же множитель нужен нам, чтобы иконки совпадали с игровыми один в один.
+pub const INVENTORY_SCALE: f32 = 0.85;
+
+/// Обводка текста: игра рисует её в два пикселя при масштабе 1.
+const SHADOW: f32 = 2.0;
+const SHADOW_COLOR: u32 = 0xFF_000000;
 
 const D3D_SDK_VERSION: u32 = 32;
 const SLOT_RESET: usize = 16;
@@ -151,6 +171,9 @@ static WHEEL: AtomicI32 = AtomicI32::new(0);
 static OVER_UI: AtomicBool = AtomicBool::new(false);
 /// Предмет под курсором; `0` — ничего. По нему показывается подсказка игры.
 static HOVER_ITEM: AtomicI32 = AtomicI32::new(0);
+/// Курсор стоит в строке поиска: клавиши сейчас про текст, и хоткеи
+/// рабочего потока трогать нельзя — иначе Delete выгрузит DLL при наборе.
+static TYPING: AtomicBool = AtomicBool::new(false);
 /// Масштаб интерфейса игры, битами `f32`: атомика для плавающих нет.
 static UI_SCALE: AtomicU32 = AtomicU32::new(0);
 /// Отрисовка уронила панику: дальше не рисуем, но игру не роняем.
@@ -821,7 +844,20 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// Строка с чёрной обводкой — так игра рисует весь свой текст
+    /// (`ChatManager.DrawColorCodedStringWithShadow`): четыре чёрных прохода
+    /// со сдвигом по осям и цветной поверх. Без обводки шрифт тот же самый,
+    /// но выглядит тусклым и чужим: он рассчитан на неё.
     pub fn text(&mut self, x: f32, y: f32, value: &str, color: u32) {
+        let shadow = (SHADOW * self.scale).round().max(1.0);
+        for (dx, dy) in [(-shadow, 0.0), (shadow, 0.0), (0.0, -shadow), (0.0, shadow)] {
+            self.glyphs(x + dx, y + dy, value, SHADOW_COLOR);
+        }
+        self.glyphs(x, y, value, color);
+    }
+
+    /// Один проход по глифам, без обводки.
+    fn glyphs(&mut self, x: f32, y: f32, value: &str, color: u32) {
         let Some(font) = self.font else {
             return;
         };
@@ -1061,6 +1097,35 @@ pub fn on_draw_cursor() {
     if item > 0 {
         let _ = catch_unwind(AssertUnwindSafe(|| crate::input::show_item_tooltip(item)));
     }
+
+    // Набор в строке поиска игра разбирает сама — оттуда же, откуда это
+    // делают её собственные поля ввода, то есть из отрисовки интерфейса.
+    if TYPING.load(Ordering::Relaxed) {
+        let _ = catch_unwind(AssertUnwindSafe(pump_search_text));
+    }
+}
+
+/// Забирает у игры новое значение строки поиска.
+fn pump_search_text() {
+    let Ok(mut guard) = UI.lock() else {
+        return;
+    };
+    let Some(state) = guard.as_mut() else {
+        return;
+    };
+    let Some(next) = crate::input::edit_text(&state.search) else {
+        return;
+    };
+    if next != state.search {
+        state.search = next;
+        // Список стал другим — показывать его с прежней прокрутки незачем.
+        state.filter_row = 0;
+    }
+}
+
+/// Идёт набор в строке поиска: хоткеи трогать нельзя.
+pub fn is_typing() -> bool {
+    TYPING.load(Ordering::Relaxed)
 }
 
 /// Отрисовка под `catch_unwind`: паника внутри чужого кадра убьёт игру.
@@ -1146,6 +1211,7 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
 
     OVER_UI.store(frame.over_ui, Ordering::Relaxed);
     HOVER_ITEM.store(frame.hover_item, Ordering::Relaxed);
+    TYPING.store(frame.typing, Ordering::Relaxed);
 
     let texture_ptr = FONT_TEXTURE.load(Ordering::Relaxed);
     let block_ptr = STATE_BLOCK.load(Ordering::Relaxed);

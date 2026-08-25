@@ -31,23 +31,27 @@ pub const PANEL: i32 = -3;
 pub const PANEL_BORDER: i32 = -4;
 pub const INNER_PANEL: i32 = -5;
 pub const SLOT: i32 = -6;
-pub const BUTTON: i32 = -7;
 pub const TOGGLE_OFF: i32 = -8;
 pub const TOGGLE_ON: i32 = -9;
 pub const BAR_TRACK: i32 = -10;
 pub const BAR_HANDLE: i32 = -11;
-// Цветные ячейки инвентаря: игра держит их отдельными текстурами и берёт
+// Ячейки инвентаря: игра держит варианты отдельными текстурами и берёт
 // нужную по смыслу слота. Тонировать обычную бесполезно — она тёмно-синяя,
-// умножение цветом даёт грязь.
-pub const SLOT_ALLOW: i32 = -12;
-pub const SLOT_DENY: i32 = -13;
-pub const SLOT_HOVER: i32 = -14;
+// умножение цветом даёт грязь, а вот у `Inventory_Back15` светлая рамка,
+// и она принимает цвет: ровно так игра подсвечивает и новые предметы,
+// и слоты, куда предмет положить можно или нельзя.
+pub const SLOT_MARK: i32 = -12;
+pub const SLOT_HOVER: i32 = -13;
+/// Красный крестик поверх отвергнутого предмета. Своей такой картинки
+/// у игры нет, поэтому рисуем её сами — зато одним квадом, а не лесенкой.
+pub const CROSS: i32 = -14;
+pub const SEARCH: i32 = -15;
+pub const SEARCH_CANCEL: i32 = -16;
 
 /// Ширина рамки при девятичастной нарезке, в пикселях исходной текстуры.
 /// Для панели это раскладка самой игры: 12 + 4 + 12 = 28.
 pub const PANEL_INSET: f32 = 12.0;
 pub const INNER_INSET: f32 = 8.0;
-pub const BUTTON_INSET: f32 = 8.0;
 pub const BAR_INSET: f32 = 6.0;
 
 /// Что взять из `Content/Images`: id, путь без расширения, вырезка.
@@ -57,10 +61,10 @@ const UI_ASSETS: &[(i32, &str, Option<[u32; 4]>)] = &[
     (PANEL_BORDER, "UI/PanelBorder", None),
     (INNER_PANEL, "UI/InnerPanelBackground", None),
     (SLOT, "Inventory_Back", None),
-    (SLOT_ALLOW, "Inventory_Back3", None),
-    (SLOT_DENY, "Inventory_Back5", None),
+    (SLOT_MARK, "Inventory_Back15", None),
     (SLOT_HOVER, "Inventory_Back13", None),
-    (BUTTON, "UI/ButtonBacking", None),
+    (SEARCH, "UI/Bestiary/Button_Search", None),
+    (SEARCH_CANCEL, "UI/SearchCancel", None),
     // Переключатель из меню настроек: слева кольцо «выкл», справа диск «вкл».
     (TOGGLE_OFF, "UI/Settings_Toggle", Some([0, 0, 14, 14])),
     (TOGGLE_ON, "UI/Settings_Toggle", Some([16, 0, 14, 14])),
@@ -101,6 +105,7 @@ pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
     let mut loaded: Vec<(i32, xnb::Image)> = Vec::with_capacity(items.len() + UI_ASSETS.len() + 1);
 
     loaded.push((WHITE, white_block()));
+    loaded.push((CROSS, cross_block()));
     for (id, name, cut) in UI_ASSETS {
         let path = content.join(format!("{name}.xnb"));
         let Some(image) = xnb::load_texture(&path) else {
@@ -209,5 +214,35 @@ fn white_block() -> xnb::Image {
         width: 4,
         height: 4,
         pixels: vec![0xFFFF_FFFF; 16],
+    }
+}
+
+/// Косой крест. Белый — цвет ему задаётся при отрисовке.
+fn cross_block() -> xnb::Image {
+    const SIZE: u32 = 24;
+    /// Полутолщина штриха: расстояние от диагонали, где ещё рисуем.
+    /// Тонко нарочно — под крестиком должно быть видно сам предмет.
+    const HALF: f32 = 1.2;
+
+    let mut pixels = vec![0u32; (SIZE * SIZE) as usize];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            // Расстояние до обеих диагоналей квадрата.
+            let down = (fx - fy).abs();
+            let up = (fx + fy - SIZE as f32).abs();
+            let near = down.min(up) / std::f32::consts::SQRT_2;
+            if near <= HALF {
+                // Край штриха гасим по прозрачности: получается ровнее,
+                // чем ступеньки, и на любом масштабе выглядит опрятно.
+                let alpha = ((HALF - near).min(1.0) * 255.0) as u32;
+                pixels[(y * SIZE + x) as usize] = (alpha << 24) | 0x00FF_FFFF;
+            }
+        }
+    }
+    xnb::Image {
+        width: SIZE,
+        height: SIZE,
+        pixels,
     }
 }

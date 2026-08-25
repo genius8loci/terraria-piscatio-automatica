@@ -59,6 +59,22 @@ struct Handles {
     /// Всё, что нужно для подсказки предмета. Целиком необязательно:
     /// не нашлось — просто не будет подсказок.
     tooltip: Option<TooltipApi>,
+    /// То же для строки поиска: не нашлось — не будет ввода.
+    text: Option<TextApi>,
+}
+
+/// Руки игры, которыми набирается текст в строке поиска.
+struct TextApi {
+    /// `PlayerInput.WritingText` — «клавиши сейчас про текст, не про игрока».
+    /// Игра гасит его каждый кадр в `UpdateInput`, поэтому поднимать надо
+    /// заново, пока строка в фокусе; забыть — само отпустит.
+    writing: Field,
+    /// `Main.instance` и его `HandleIME()`: он наполняет буфер символов,
+    /// из которого `GetInputText` и берёт набранное.
+    instance: Field,
+    handle_ime: Method,
+    /// `Main.GetInputText(string)` — весь разбор клавиш уже внутри.
+    get_input: Method,
 }
 
 /// Руки игры, которыми показывается подсказка предмета.
@@ -209,7 +225,17 @@ fn attach() -> Option<Handles> {
         control_use_item: player.field("controlUseItem").ok()?,
         mouse_interface: player.field("mouseInterface").ok()?,
         tooltip: tooltip_api(&assembly, &main),
+        text: text_api(&main, input.as_ref()),
         _clr: clr,
+    })
+}
+
+fn text_api(main: &Type, input: Option<&Type>) -> Option<TextApi> {
+    Some(TextApi {
+        writing: input?.field("WritingText").ok()?,
+        instance: main.field("instance").ok()?,
+        handle_ime: main.method("HandleIME").ok()?,
+        get_input: main.method("GetInputText").ok()?,
     })
 }
 
@@ -357,6 +383,28 @@ pub fn show_item_tooltip(id: i32) {
         return;
     }
     let _ = api.hover_item.set_static(Var::object(&hovered.item));
+}
+
+/// Отдаёт строку поиска игре на правку: она сама разберёт нажатия,
+/// Backspace, Ctrl+V и раскладку. Возвращает новое значение.
+///
+/// Звать каждый кадр, пока строка в фокусе, и только оттуда же, откуда это
+/// делает сама игра — из отрисовки интерфейса. `WritingText` при этом
+/// поднимается заново: игра гасит его каждый кадр, так что стоит перестать
+/// звать — и клавиши сразу вернутся игроку.
+pub fn edit_text(current: &str) -> Option<String> {
+    let handles = handles()?;
+    let api = handles.text.as_ref()?;
+
+    api.writing.set_static(Var::boolean(true)).ok()?;
+    let instance = api.instance.get_static().ok()?;
+    if !instance.is_null() {
+        let _ = api.handle_ime.invoke(&instance, &[]);
+    }
+    api.get_input
+        .invoke(&Var::null(), &[Var::text(current)])
+        .ok()?
+        .as_string()
 }
 
 /// Заводит свой экземпляр `Item` под нужный id.

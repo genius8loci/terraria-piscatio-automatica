@@ -19,8 +19,9 @@ const AFTER_PULL: u64 = 350;
 const AFTER_CAST: u64 = 700;
 /// Сколько ждать применения нажатия, прежде чем считать его потерянным.
 const CLICK_TIMEOUT: Duration = Duration::from_millis(1200);
-/// Как часто перечитывать наживку и слоты.
-const STOCK_INTERVAL: Duration = Duration::from_secs(2);
+/// Как часто перечитывать наживку и слоты. Число свободных ячеек видно
+/// в панели, и раз в пару секунд оно заметно отставало от инвентаря.
+const STOCK_INTERVAL: Duration = Duration::from_millis(300);
 /// Как часто проверять бафы зелий.
 const POTION_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -37,9 +38,16 @@ pub struct Fishing {
     last_potion: Instant,
     warned_no_detour: bool,
 
+    /// Когда поплавок ушёл в воду — от этого мгновения меряем поклёвку.
+    cast_at: Option<Instant>,
+    /// Сумма и число замеров: среднее считаем по ним, а не по последнему.
+    bite_total: f32,
+    bite_count: u32,
+
     pub casts: u32,
     pub pulls: u32,
     pub skips: u32,
+    pub crates: u32,
 }
 
 impl Fishing {
@@ -55,9 +63,13 @@ impl Fishing {
             last_stock: Instant::now() - STOCK_INTERVAL,
             last_potion: Instant::now() - POTION_INTERVAL,
             warned_no_detour: false,
+            cast_at: None,
+            bite_total: 0.0,
+            bite_count: 0,
             casts: 0,
             pulls: 0,
             skips: 0,
+            crates: 0,
         }
     }
 
@@ -148,9 +160,12 @@ impl Fishing {
                 self.remember_aim(game);
 
                 if bobber.has_bite() {
-                    self.on_bite(config, bobber.rolled());
+                    self.on_bite(game, config, bobber.rolled());
                 } else {
                     self.last_bite = 0;
+                    // Поплавок в воде и пока молчит — отсюда и пойдёт отсчёт
+                    // до поклёвки, если он ещё не начался.
+                    self.cast_at.get_or_insert_with(Instant::now);
                 }
             }
             Ok(None) => {
@@ -162,10 +177,17 @@ impl Fishing {
         }
 
         let status = self.status();
+        let average = if self.bite_count == 0 {
+            0.0
+        } else {
+            self.bite_total / self.bite_count as f32
+        };
         state::with(|s| {
             s.status.fishing = status;
             s.stats.caught = self.pulls;
             s.stats.skipped = self.skips;
+            s.stats.crates = self.crates;
+            s.stats.average_bite = average;
         });
     }
 
@@ -231,11 +253,18 @@ impl Fishing {
         }
     }
 
-    fn on_bite(&mut self, config: &Config, rolled: i32) {
+    fn on_bite(&mut self, game: &Game, config: &Config, rolled: i32) {
         if rolled == self.last_bite {
             return;
         }
         self.last_bite = rolled;
+
+        // Замер делаем на первом же обнаружении поклёвки, независимо от того,
+        // будем подсекать или нет: ждали-то мы её в любом случае.
+        if let Some(cast) = self.cast_at.take() {
+            self.bite_total += cast.elapsed().as_secs_f32();
+            self.bite_count += 1;
+        }
 
         let take = state::with(|s| s.should_pull(rolled)).unwrap_or(true);
         if !take {
@@ -255,6 +284,10 @@ impl Fishing {
             return;
         }
         self.pulls += 1;
+        // Что именно ящик, знает игра: `ItemID.Sets.IsFishingCrate`.
+        if game.is_crate(rolled) {
+            self.crates += 1;
+        }
         log!("подсечка #{}: улов {rolled}", self.pulls);
         let pause = self.jitter(config, AFTER_PULL);
         self.next_action = Instant::now() + pause;
