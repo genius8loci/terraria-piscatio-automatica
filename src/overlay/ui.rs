@@ -12,17 +12,23 @@ use super::state::{self, Mark};
 use super::{Painter, colors, icons};
 
 /// Заголовок панели собирается из `Cargo.toml`, чтобы не разъезжаться
-/// со свойствами самой DLL: там те же `description` и `authors`.
+/// со свойствами самой DLL: там те же `description`, `version` и `authors`.
 const TITLE: &str = concat!(
     env!("CARGO_PKG_DESCRIPTION"),
+    " ",
+    env!("CARGO_PKG_VERSION"),
     " by ",
     env!("CARGO_PKG_AUTHORS")
 );
 
+/// Насколько панель плотнее родного интерфейса игры.
+const DENSITY: f32 = 0.9;
+
 /// Базовые размеры при масштабе 1.0; всё остальное — умножением.
 const ROW_H: f32 = 34.0;
-/// Ширина подобрана под заголовок: он длиннее любой строки в панели.
-const PANEL_W: f32 = 640.0;
+/// Ширина по самой длинной строке внутри. Заголовок собирается из
+/// `Cargo.toml` и может оказаться длиннее — тогда панель раздвинется.
+const PANEL_W: f32 = 600.0;
 const PAD: f32 = 12.0;
 const GAP: f32 = 6.0;
 const ARROW_W: f32 = 64.0;
@@ -50,6 +56,8 @@ pub struct UiState {
     pub tab: Tab,
     /// Первая видимая строка сетки фильтра.
     pub filter_row: usize,
+    /// Ползунок прокрутки схвачен: сколько было от его верха до курсора.
+    pub drag: Option<f32>,
 }
 
 impl Default for UiState {
@@ -58,6 +66,7 @@ impl Default for UiState {
             expanded: true,
             tab: Tab::None,
             filter_row: 0,
+            drag: None,
         }
     }
 }
@@ -68,6 +77,19 @@ pub struct Input {
     pub y: f32,
     /// Кнопка нажата именно в этом кадре.
     pub clicked: bool,
+    /// Кнопка держится — по этому тянут ползунок.
+    pub down: bool,
+    /// Щелчки колеса за кадр: вверх положительные.
+    pub wheel: i32,
+}
+
+/// Что кадр рассказал наружу.
+#[derive(Clone, Copy, Default)]
+pub struct Frame {
+    /// Курсор над окном — клик не должен уходить в игру.
+    pub over_ui: bool,
+    /// Предмет под курсором; `0` — ничего.
+    pub hover_item: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -90,6 +112,8 @@ pub struct Layout<'a, 'b> {
     scale: f32,
     /// Курсор попал хоть в одну нашу область — игре клик отдавать нельзя.
     pub over_ui: bool,
+    /// Предмет под курсором — по нему покажем подсказку игры.
+    pub hover_item: i32,
 }
 
 impl<'a, 'b> Layout<'a, 'b> {
@@ -105,8 +129,21 @@ impl<'a, 'b> Layout<'a, 'b> {
         r.contains(self.input.x, self.input.y)
     }
 
+    /// Ячейка предмета: попадание плюс заявка на подсказку.
+    fn hit_item(&mut self, r: Rect, item: i32) -> bool {
+        if self.hovered(r) {
+            self.hover_item = item;
+        }
+        self.hit(r)
+    }
+
     /// Окно: фон и обводка поверх него — ровно так рисует панели игра.
+    /// Заодно занимает мышь целиком: щели между строками — тоже наша
+    /// территория, клик сквозь них уходить в мир не должен.
     fn panel(&mut self, r: Rect) {
+        if self.hovered(r) {
+            self.over_ui = true;
+        }
         self.painter.nine_slice(
             icons::PANEL,
             r.x,
@@ -168,17 +205,13 @@ impl<'a, 'b> Layout<'a, 'b> {
     /// Переключатель, прижатый к правому краю строки, вместе с подписью слева.
     fn switch_row(&mut self, r: Rect, label: &str, on: bool) -> bool {
         self.row_bg(r);
-        let line = self.painter.line_height();
-        self.painter.text(
-            r.x + PAD * self.scale,
-            r.y + (r.h - line) * 0.5,
-            label,
-            colors::TEXT,
-        );
+        let pad = (PAD * self.scale).round();
+        self.painter
+            .text_left(r.x + pad, r.y, r.h, label, colors::TEXT);
         let size = (TOGGLE * self.scale).round();
         let knob = Rect {
-            x: r.x + r.w - size - PAD * self.scale,
-            y: r.y + (r.h - size) * 0.5,
+            x: r.x + r.w - size - pad,
+            y: (r.y + (r.h - size) * 0.5).round(),
             w: size,
             h: size,
         };
@@ -188,12 +221,11 @@ impl<'a, 'b> Layout<'a, 'b> {
     /// Строка «подпись — значение».
     fn value_row(&mut self, r: Rect, label: &str, value: &str, color: u32) {
         self.row_bg(r);
-        let line = self.painter.line_height();
-        let pad = PAD * self.scale;
+        let pad = (PAD * self.scale).round();
         self.painter
-            .text(r.x + pad, r.y + (r.h - line) * 0.5, label, colors::TEXT);
+            .text_left(r.x + pad, r.y, r.h, label, colors::TEXT);
         self.painter
-            .text_right(r.x, r.y + (r.h - line) * 0.5, r.w - pad, value, color);
+            .text_right(r.x, r.y, r.w - pad, r.h, value, color);
     }
 
     /// Запасной курсор: нужен, только если панель рисуется из `Present`,
@@ -223,8 +255,7 @@ impl<'a, 'b> Layout<'a, 'b> {
     }
 }
 
-/// Строит кадр интерфейса. Возвращает `true`, если курсор над окнами —
-/// тогда клик не должен уходить в игру.
+/// Строит кадр интерфейса.
 pub fn build(
     painter: &mut Painter,
     ui: &mut UiState,
@@ -232,11 +263,13 @@ pub fn build(
     screen: (f32, f32),
     ui_scale: f32,
     own_cursor: bool,
-) -> bool {
+) -> Frame {
     // Растём вместе с интерфейсом игры: масштаб — её собственная настройка.
-    // Но не больше, чем позволяет высота экрана: иначе окно фильтра уедет
-    // за нижний край. На обычных разрешениях предел не срабатывает.
-    let scale = ui_scale
+    // Чуть плотнее родного: у нас строки текста, а не ряды ячеек, и в один
+    // к одному панель выглядит рядом с игровым интерфейсом громоздкой.
+    // Сверху ограничены высотой экрана, иначе окно фильтра уедет за край;
+    // на обычных разрешениях этот предел не срабатывает.
+    let scale = (ui_scale * DENSITY)
         .clamp(0.5, 3.0)
         .min(screen.1 / NEEDED_HEIGHT)
         .max(0.5);
@@ -246,9 +279,17 @@ pub fn build(
         input,
         scale,
         over_ui: false,
+        hover_item: 0,
     };
 
-    let panel_w = (PANEL_W * scale).round();
+    // Заголовок собирается из `Cargo.toml` и заранее неизвестной длины,
+    // поэтому панель раздвигается под него, а не наоборот. Шире экрана
+    // при этом не становится.
+    let title_w = layout.painter.measure(TITLE) + (PAD * 2.0 * scale).round();
+    let panel_w = (PANEL_W * scale)
+        .max(title_w)
+        .min(screen.0 - (SCREEN_MARGIN * 2.0 * scale))
+        .round();
     let x = ((screen.0 - panel_w) * 0.5).floor();
     let mut y = (8.0 * scale).round();
 
@@ -276,7 +317,10 @@ pub fn build(
         if own_cursor {
             layout.draw_cursor();
         }
-        return layout.over_ui;
+        return Frame {
+            over_ui: layout.over_ui,
+            hover_item: 0,
+        };
     }
 
     let row_h = (ROW_H * scale).round();
@@ -302,9 +346,15 @@ pub fn build(
     let title = if layout.painter.measure(TITLE) <= inner_w {
         TITLE
     } else {
-        env!("CARGO_PKG_DESCRIPTION")
+        concat!(
+            env!("CARGO_PKG_DESCRIPTION"),
+            " ",
+            env!("CARGO_PKG_VERSION")
+        )
     };
-    layout.painter.text(inner_x, cursor, title, colors::TITLE);
+    layout
+        .painter
+        .text_left(inner_x, cursor, row_h, title, colors::TITLE);
     cursor += row_h;
 
     let next_row = |cursor: &mut f32| -> Rect {
@@ -361,13 +411,9 @@ pub fn build(
     // Тот же кружок, что у переключателей, но кликать по нему нечего.
     let r = next_row(&mut cursor);
     layout.row_bg(r);
-    let line = layout.painter.line_height();
-    layout.painter.text(
-        r.x + pad,
-        r.y + (r.h - line) * 0.5,
-        "Поплавок",
-        colors::TEXT,
-    );
+    layout
+        .painter
+        .text_left(r.x + pad, r.y, r.h, "Поплавок", colors::TEXT);
     let label = if cast { "Заброшен" } else { "Нет" };
     let label_w = layout.painter.measure(label);
     let size = (TOGGLE * scale).round();
@@ -377,16 +423,17 @@ pub fn build(
         } else {
             icons::TOGGLE_OFF
         },
-        r.x + r.w - pad - label_w - size - GAP * scale,
-        r.y + (r.h - size) * 0.5,
+        (r.x + r.w - pad - label_w - size - GAP * scale).round(),
+        (r.y + (r.h - size) * 0.5).round(),
         size,
         size,
         if cast { colors::ON } else { colors::MUTED },
     );
     layout.painter.text_right(
         r.x,
-        r.y + (r.h - line) * 0.5,
+        r.y,
         r.w - pad,
+        r.h,
         label,
         if cast { colors::ON } else { colors::MUTED },
     );
@@ -410,9 +457,10 @@ pub fn build(
     }
 
     // --- ячейки зелий ------------------------------------------------------
-    layout.painter.text(
+    layout.painter.text_left(
         inner_x,
-        cursor + (slot - line) * 0.5,
+        cursor,
+        slot,
         "Зелья для автоиспользования:",
         colors::TEXT,
     );
@@ -425,7 +473,7 @@ pub fn build(
             h: slot,
         };
         let on = potions[index];
-        if layout.hit(cell) {
+        if layout.hit_item(cell, *item) {
             state::with(|s| {
                 s.potions[index] = !s.potions[index];
                 s.dirty = true;
@@ -487,7 +535,10 @@ pub fn build(
     if own_cursor {
         layout.draw_cursor();
     }
-    layout.over_ui
+    Frame {
+        over_ui: layout.over_ui,
+        hover_item: layout.hover_item,
+    }
 }
 
 /// Окно фильтра ровно под основным и той же ширины. Колонок столько,
@@ -531,8 +582,7 @@ fn filter_window(
     }
     let visible = fits.min(rows);
     let scrollable = rows > visible;
-
-    ui.filter_row = ui.filter_row.min(rows.saturating_sub(visible));
+    let limit = rows.saturating_sub(visible);
 
     let panel = Rect {
         x,
@@ -540,6 +590,14 @@ fn filter_window(
         w: panel_w,
         h: head_h + visible as f32 * (cell + gap) - gap + pad,
     };
+
+    // Прокрутку двигаем до раскладки, иначе колесо отставало бы на кадр.
+    if scrollable && layout.input.wheel != 0 && layout.hovered(panel) {
+        let row = ui.filter_row as i32 - layout.input.wheel;
+        ui.filter_row = row.clamp(0, limit as i32) as usize;
+    }
+    ui.filter_row = ui.filter_row.min(limit);
+
     layout.panel(panel);
 
     let inner_x = panel.x + pad;
@@ -547,7 +605,7 @@ fn filter_window(
     let mut cursor = panel.y + pad;
     layout
         .painter
-        .text(inner_x, cursor, "Фильтр", colors::TITLE);
+        .text_left(inner_x, cursor, row_h, "Фильтр", colors::TITLE);
     cursor += row_h;
 
     // Режим списка: белый — берём только отмеченное, чёрный — всё кроме.
@@ -588,7 +646,7 @@ fn filter_window(
         };
         let mark = state::with(|s| s.filter.get(item).copied().unwrap_or(Mark::Neutral))
             .unwrap_or(Mark::Neutral);
-        if layout.hit(r) {
+        if layout.hit_item(r, *item) {
             state::with(|s| {
                 let next = s.filter.get(item).copied().unwrap_or(Mark::Neutral).next();
                 if next == Mark::Neutral {
@@ -619,11 +677,13 @@ fn filter_window(
             h: visible as f32 * (cell + gap) - gap,
         };
         scrollbar(layout, track, ui, rows, visible, scale);
+    } else {
+        ui.filter_row = 0;
     }
 }
 
-/// Полоса прокрутки как у игры. Колеса мыши мы не видим, поэтому клик выше
-/// ползунка листает страницу вверх, ниже — вниз.
+/// Полоса прокрутки как у игры: ползунок таскается мышью, клик мимо него
+/// листает страницу. Колесо обрабатывается выше, по всему окну фильтра.
 fn scrollbar(
     layout: &mut Layout,
     track: Rect,
@@ -644,7 +704,7 @@ fn scrollbar(
 
     let span = (rows - visible) as f32;
     let handle_h = (track.h * visible as f32 / rows as f32).max(BAR_W * scale);
-    let travel = track.h - handle_h;
+    let travel = (track.h - handle_h).max(1.0);
     let handle_y = track.y + travel * ui.filter_row as f32 / span;
     let handle = Rect {
         x: track.x,
@@ -652,6 +712,28 @@ fn scrollbar(
         w: track.w,
         h: handle_h,
     };
+
+    // Захват ползунка: запоминаем, за какое место его взяли, и тянем,
+    // пока кнопка держится. Отпустили — отпустили, даже если курсор ушёл.
+    if layout.input.clicked && layout.hovered(handle) {
+        ui.drag = Some(layout.input.y - handle.y);
+    }
+    if !layout.input.down {
+        ui.drag = None;
+    }
+    if let Some(grab) = ui.drag {
+        layout.over_ui = true;
+        let offset = ((layout.input.y - grab - track.y) / travel).clamp(0.0, 1.0);
+        ui.filter_row = (offset * span).round() as usize;
+    } else if layout.hit(track) {
+        // Мимо ползунка — листаем страницами, как в списках игры.
+        if layout.input.y < handle.y {
+            ui.filter_row = ui.filter_row.saturating_sub(visible);
+        } else if layout.input.y >= handle.y + handle.h {
+            ui.filter_row = (ui.filter_row + visible).min(rows - visible);
+        }
+    }
+
     layout.painter.nine_slice(
         icons::BAR_HANDLE,
         handle.x,
@@ -659,20 +741,12 @@ fn scrollbar(
         handle.w,
         handle.h,
         icons::BAR_INSET,
-        if layout.hovered(handle) {
+        if ui.drag.is_some() || layout.hovered(handle) {
             colors::HANDLE_HOVER
         } else {
             colors::HANDLE
         },
     );
-
-    if layout.hit(track) {
-        if layout.input.y < handle.y {
-            ui.filter_row = ui.filter_row.saturating_sub(visible);
-        } else if layout.input.y >= handle.y + handle.h {
-            ui.filter_row = (ui.filter_row + visible).min(rows - visible);
-        }
-    }
 }
 
 fn stats_window(layout: &mut Layout, x: f32, y: f32, w: f32, scale: f32) {

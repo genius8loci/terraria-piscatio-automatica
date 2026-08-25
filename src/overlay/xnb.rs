@@ -43,9 +43,24 @@ pub struct GameFont {
     pub height: u32,
     /// A8R8G8B8 — как ждёт D3DFMT_A8R8G8B8.
     pub pixels: Vec<u32>,
+    /// Межстрочный интервал из файла шрифта. Для выравнивания не годится —
+    /// он заметно больше видимой части строки, см. `ink_top`/`ink_bottom`.
+    #[allow(dead_code)]
     pub line_height: f32,
     pub space_advance: f32,
+    /// Видимая коробка строки: где реально начинаются и кончаются чернила.
+    /// `line_height` — это межстрочный интервал из файла шрифта, он заметно
+    /// больше, и центрировать по нему — значит прижимать текст к верху.
+    pub ink_top: f32,
+    pub ink_bottom: f32,
     pub glyphs: HashMap<char, Glyph>,
+}
+
+impl GameFont {
+    /// Высота видимой части строки.
+    pub fn ink_height(&self) -> f32 {
+        (self.ink_bottom - self.ink_top).max(1.0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -418,12 +433,31 @@ fn pack(
         .map(|g| g.advance)
         .unwrap_or(line_height * 0.35);
 
+    // Видимую коробку меряем по обычным буквам: по ним выравнивается глаз.
+    // Скобки и знаки препинания заметно выше и ниже, и если считать по ним,
+    // строки в панели поедут вверх.
+    let mut ink_top = f32::MAX;
+    let mut ink_bottom = f32::MIN;
+    for (ch, glyph) in &glyphs {
+        if !ch.is_alphabetic() || glyph.h == 0 {
+            continue;
+        }
+        ink_top = ink_top.min(glyph.off_y);
+        ink_bottom = ink_bottom.max(glyph.off_y + glyph.h as f32);
+    }
+    if ink_top > ink_bottom {
+        ink_top = 0.0;
+        ink_bottom = line_height;
+    }
+
     Some(GameFont {
         width: ATLAS_WIDTH,
         height: atlas_h,
         pixels,
         line_height,
         space_advance,
+        ink_top,
+        ink_bottom,
         glyphs,
     })
 }

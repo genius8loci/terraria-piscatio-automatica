@@ -12,7 +12,11 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 
-use crate::clr::{BINDING_NON_PUBLIC, BINDING_STATIC, Clr, Field, Var, array_get};
+use windows::core::IUnknown;
+
+use crate::clr::{
+    Assembly, BINDING_NON_PUBLIC, BINDING_STATIC, Clr, Field, Method, Type, Var, array_get,
+};
 
 pub const CMD_NONE: u8 = 0;
 /// Нажать в этом кадре.
@@ -48,8 +52,34 @@ struct Handles {
     /// Свойство `Main.UIScale` только его и возвращает, а до приватного
     /// поля дотянуться проще, чем до геттера.
     ui_scale: Option<Field>,
+    /// `PlayerInput.ScrollWheelDelta` — колесо за кадр, в сотых долях.
+    wheel: Option<Field>,
     control_use_item: Field,
     mouse_interface: Field,
+    /// Всё, что нужно для подсказки предмета. Целиком необязательно:
+    /// не нашлось — просто не будет подсказок.
+    tooltip: Option<TooltipApi>,
+}
+
+/// Руки игры, которыми показывается подсказка предмета.
+struct TooltipApi {
+    /// `Main.HoverItem` — предмет, о котором рассказывает подсказка.
+    hover_item: Field,
+    /// `Main.DisplayAndGetFakeItem` — заводит очередь подсказки; её рисует
+    /// `DrawPendingMouseText` в самом конце интерфейса.
+    display: Method,
+    /// `Item.Clone` — чтобы завести свой экземпляр, не трогая чужие.
+    clone: Method,
+    /// `Item.netDefaults` — единственная неперегруженная настройка по id.
+    net_defaults: Method,
+    rare: Field,
+}
+
+/// Предмет, о котором сейчас рассказывает подсказка.
+struct Hovered {
+    item: IUnknown,
+    id: i32,
+    rare: i32,
 }
 
 impl Handles {
@@ -68,10 +98,11 @@ impl Handles {
 ///
 /// `Drop` здесь намеренно не вызывается: деструктор в выгруженном модуле
 /// уронил бы игру. При снятии детура содержимое просто утекает.
-struct GameThreadCell(UnsafeCell<Option<Handles>>);
-unsafe impl Sync for GameThreadCell {}
+struct GameThreadCell<T>(UnsafeCell<T>);
+unsafe impl<T> Sync for GameThreadCell<T> {}
 
-static HANDLES: GameThreadCell = GameThreadCell(UnsafeCell::new(None));
+static HANDLES: GameThreadCell<Option<Handles>> = GameThreadCell(UnsafeCell::new(None));
+static HOVERED: GameThreadCell<Option<Hovered>> = GameThreadCell(UnsafeCell::new(None));
 
 /// Вызывается из детура на входе в `Player.ItemCheck`.
 pub fn on_item_check(_this: *mut c_void) {
@@ -172,9 +203,26 @@ fn attach() -> Option<Handles> {
         ui_scale: main
             .field_flags("_uiScaleUsed", BINDING_NON_PUBLIC | BINDING_STATIC)
             .ok(),
+        wheel: input
+            .as_ref()
+            .and_then(|t| t.field("ScrollWheelDelta").ok()),
         control_use_item: player.field("controlUseItem").ok()?,
         mouse_interface: player.field("mouseInterface").ok()?,
+        tooltip: tooltip_api(&assembly, &main),
         _clr: clr,
+    })
+}
+
+/// Собирает всё нужное для подсказки. Ни одно из этого не критично:
+/// не нашлось — просто не будет подсказок, остальное работает.
+fn tooltip_api(assembly: &Assembly, main: &Type) -> Option<TooltipApi> {
+    let item = assembly.get_type("Terraria.Item").ok()?;
+    Some(TooltipApi {
+        hover_item: main.field("HoverItem").ok()?,
+        display: main.method("DisplayAndGetFakeItem").ok()?,
+        clone: item.method("Clone").ok()?,
+        net_defaults: item.method("netDefaults").ok()?,
+        rare: item.field("rare").ok()?,
     })
 }
 
@@ -253,6 +301,23 @@ pub fn ui_scale() -> Option<f32> {
     handles()?.ui_scale.as_ref()?.get_static().ok()?.as_float()
 }
 
+/// Колесо мыши за этот кадр, в «щелчках»: игра держит его в сотых долях,
+/// один щелчок — 120.
+pub fn wheel() -> i32 {
+    let Some(handles) = handles() else {
+        return 0;
+    };
+    let Some(field) = handles.wheel.as_ref() else {
+        return 0;
+    };
+    let raw = field
+        .get_static()
+        .ok()
+        .and_then(|v| v.as_int())
+        .unwrap_or(0);
+    raw / 120
+}
+
 /// Курсор над нашим окном — сообщаем игре, чтобы клик не ушёл в мир.
 ///
 /// Только выставляем флаг, никогда не снимаем. `Player.mouseInterface` —
@@ -260,6 +325,55 @@ pub fn ui_scale() -> Option<f32> {
 /// каждый, кто держит под курсором свою кнопку, поднимает заново. Записать
 /// туда `false` — значит стереть чужое «да», и клик по кнопке торговца
 /// уходит в мир вместо магазина.
+/// Показывает подсказку игры для предмета — ту самую, что в инвентаре.
+///
+/// Ничего не рисуем сами: `Main.DisplayAndGetFakeItem` наполняет очередь
+/// подсказки, а рисует её `DrawPendingMouseText` в самом конце интерфейса,
+/// уже после нас. Текст берётся из `Main.HoverItem`, туда и кладём свой
+/// экземпляр `Item` — заведённый один раз клоном и настроенный по id.
+/// Звать только с игрового потока, изнутри отрисовки интерфейса.
+pub fn show_item_tooltip(id: i32) {
+    let Some(handles) = handles() else {
+        return;
+    };
+    let Some(api) = handles.tooltip.as_ref() else {
+        return;
+    };
+
+    let slot = unsafe { &mut *HOVERED.0.get() };
+    if slot.as_ref().map(|h| h.id) != Some(id) {
+        *slot = make_hovered(api, id);
+    }
+    let Some(hovered) = slot.as_ref() else {
+        return;
+    };
+
+    // Редкость отдаём игре: от неё зависит цвет имени в подсказке.
+    if api
+        .display
+        .invoke(&Var::null(), &[Var::int(hovered.rare)])
+        .is_err()
+    {
+        return;
+    }
+    let _ = api.hover_item.set_static(Var::object(&hovered.item));
+}
+
+/// Заводит свой экземпляр `Item` под нужный id.
+fn make_hovered(api: &TooltipApi, id: i32) -> Option<Hovered> {
+    // Клонируем то, что лежит в `HoverItem`: это всегда живой `Item`,
+    // и `Clone` — единственный неперегруженный способ получить свой.
+    let base = api.hover_item.get_static().ok()?;
+    let item = api.clone.invoke(&base, &[]).ok()?;
+    api.net_defaults.invoke(&item, &[Var::int(id)]).ok()?;
+    let rare = api.rare.get(&item).ok()?.as_int().unwrap_or(0);
+    Some(Hovered {
+        item: item.as_unknown()?,
+        id,
+        rare,
+    })
+}
+
 pub fn claim_mouse_interface() {
     let Some(handles) = handles() else {
         return;

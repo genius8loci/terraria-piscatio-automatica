@@ -1,11 +1,11 @@
 [package]
 name = "terraria-piscatio-automatica"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 # Голые функции (`#[unsafe(naked)]` + `naked_asm!`) стабильны с 1.88 —
 # на них держится детур managed-метода.
 rust-version = "1.88"
-authors = ["@Genius_Loci https://t.me/Genius_Loci"]
+authors = ["genius8loci @Genius_Loci"]
 description = "terraria piscatio automatica"
 readme = "README.md"
 license = "MIT"

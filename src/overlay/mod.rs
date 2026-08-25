@@ -90,6 +90,11 @@ pub mod colors {
     pub const ICON_OFF: u32 = 0x99_FFFFFF;
 }
 
+/// Ячейка инвентаря у игры — текстура в 52 пикселя, и иконка внутри неё
+/// рисуется относительно этого размера. Крупнее 32 пикселей игра ужимает.
+const SLOT_TEXTURE_SIZE: f32 = 52.0;
+const SLOT_ICON_LIMIT: f32 = 32.0;
+
 const D3D_SDK_VERSION: u32 = 32;
 const SLOT_RESET: usize = 16;
 const SLOT_PRESENT: usize = 17;
@@ -138,8 +143,14 @@ static MOUSE_X: AtomicI32 = AtomicI32::new(-1);
 static MOUSE_Y: AtomicI32 = AtomicI32::new(-1);
 /// Нажатие по фронту, ещё не отданное отрисовке.
 static MOUSE_CLICK: AtomicBool = AtomicBool::new(false);
+/// Кнопка держится — по этому тянут ползунок прокрутки.
+static MOUSE_DOWN: AtomicBool = AtomicBool::new(false);
+/// Щелчки колеса, ещё не отданные отрисовке.
+static WHEEL: AtomicI32 = AtomicI32::new(0);
 /// Курсор над нашим окном — результат последней отрисовки.
 static OVER_UI: AtomicBool = AtomicBool::new(false);
+/// Предмет под курсором; `0` — ничего. По нему показывается подсказка игры.
+static HOVER_ITEM: AtomicI32 = AtomicI32::new(0);
 /// Масштаб интерфейса игры, битами `f32`: атомика для плавающих нет.
 static UI_SCALE: AtomicU32 = AtomicU32::new(0);
 /// Отрисовка уронила панику: дальше не рисуем, но игру не роняем.
@@ -498,7 +509,7 @@ unsafe fn present(
         // Ввод и масштаб глазами игры — единственное место, где мы трогаем
         // CLR из кадра. Детур курсора читает уже готовые значения.
         let (mx, my, down) = crate::input::cursor().unwrap_or((-1, -1, false));
-        feed_input(mx, my, down);
+        feed_input(mx, my, down, crate::input::wheel());
         if let Some(scale) = crate::input::ui_scale() {
             UI_SCALE.store(scale.to_bits(), Ordering::Relaxed);
         }
@@ -511,9 +522,11 @@ unsafe fn present(
             prepare(device);
         } else {
             OVER_UI.store(false, Ordering::Relaxed);
+            HOVER_ITEM.store(0, Ordering::Relaxed);
             // Иначе нажатие, сделанное при скрытой панели, сработает,
             // как только её покажут.
             MOUSE_CLICK.store(false, Ordering::Relaxed);
+            WHEEL.store(0, Ordering::Relaxed);
         }
         // Пока курсор над окном, игра не должна считать клик игровым.
         // Значение посчитал детур курсора чуть раньше в этом же кадре.
@@ -855,22 +868,41 @@ impl<'a> Painter<'a> {
             * self.scale
     }
 
-    pub fn line_height(&self) -> f32 {
-        self.font.map(|f| f.line_height).unwrap_or(20.0) * self.scale
+    /// Курсор для строки, вертикально выровненной по середине коробки.
+    /// Считаем по видимой части строки, а не по межстрочному интервалу:
+    /// он у шрифта игры заметно больше, и текст прижимался к верху.
+    fn text_baseline(&self, y: f32, h: f32) -> f32 {
+        let Some(font) = self.font else {
+            return y;
+        };
+        let ink = font.ink_height() * self.scale;
+        (y + (h - ink) * 0.5 - font.ink_top * self.scale).round()
     }
 
+    /// Строка по центру коробки — и по вертикали, и по горизонтали.
     pub fn text_centered(&mut self, x: f32, y: f32, w: f32, h: f32, value: &str, color: u32) {
         let width = self.measure(value);
-        let line = self.line_height();
-        self.text(x + (w - width) * 0.5, y + (h - line) * 0.5, value, color);
+        let baseline = self.text_baseline(y, h);
+        self.text(x + (w - width) * 0.5, baseline, value, color);
     }
 
-    pub fn text_right(&mut self, x: f32, y: f32, w: f32, value: &str, color: u32) {
+    /// Строка у левого края коробки, по центру по вертикали.
+    pub fn text_left(&mut self, x: f32, y: f32, h: f32, value: &str, color: u32) {
+        let baseline = self.text_baseline(y, h);
+        self.text(x, baseline, value, color);
+    }
+
+    /// Строка у правого края коробки, по центру по вертикали.
+    pub fn text_right(&mut self, x: f32, y: f32, w: f32, h: f32, value: &str, color: u32) {
         let width = self.measure(value);
-        self.text(x + w - width, y, value, color);
+        let baseline = self.text_baseline(y, h);
+        self.text(x + w - width, baseline, value, color);
     }
 
-    /// Иконка предмета вписывается в клетку с сохранением пропорций.
+    /// Иконка предмета в ячейке — по правилам самой игры (`ItemSlot.Draw`):
+    /// картинка больше 32 пикселей ужимается до 32 по большей стороне,
+    /// меньшая идёт как есть, и всё это умножается на размер ячейки
+    /// относительно её текстуры в 52 пикселя.
     pub fn icon(&mut self, item: i32, x: f32, y: f32, w: f32, h: f32, color: u32) {
         let Some(atlas) = self.atlas else {
             return;
@@ -878,16 +910,21 @@ impl<'a> Painter<'a> {
         let Some(rect) = atlas.get(item) else {
             return;
         };
-        let pad = 10.0 * self.scale;
-        let fit = ((w - pad) / rect.w as f32).min((h - pad) / rect.h as f32);
-        let dw = rect.w as f32 * fit;
-        let dh = rect.h as f32 * fit;
+        let longest = rect.w.max(rect.h) as f32;
+        let fit = if longest > SLOT_ICON_LIMIT {
+            SLOT_ICON_LIMIT / longest
+        } else {
+            1.0
+        };
+        let cell = fit * (w / SLOT_TEXTURE_SIZE);
+        let dw = rect.w as f32 * cell;
+        let dh = rect.h as f32 * cell;
         self.stretch(
             item,
             (x + (w - dw) * 0.5).round(),
             (y + (h - dh) * 0.5).round(),
-            dw,
-            dh,
+            dw.round(),
+            dh.round(),
             color,
         );
     }
@@ -964,13 +1001,17 @@ fn ensure_icons(device: &IDirect3DDevice9) {
 /// из CLR: детур курсора идёт по чужому кадру, и лишний вызов в рантайм
 /// оттуда — лишний повод упасть. Нажатие запоминается по фронту и живёт
 /// до ближайшей отрисовки, которая его и заберёт.
-pub(crate) fn feed_input(x: i32, y: i32, down: bool) {
+pub(crate) fn feed_input(x: i32, y: i32, down: bool, wheel: i32) {
     MOUSE_X.store(x, Ordering::Relaxed);
     MOUSE_Y.store(y, Ordering::Relaxed);
+    MOUSE_DOWN.store(down, Ordering::Relaxed);
     if down && !MOUSE_WAS_DOWN.swap(down, Ordering::Relaxed) {
         MOUSE_CLICK.store(true, Ordering::Relaxed);
     } else if !down {
         MOUSE_WAS_DOWN.store(false, Ordering::Relaxed);
+    }
+    if wheel != 0 {
+        WHEEL.fetch_add(wheel, Ordering::Relaxed);
     }
 }
 
@@ -1012,6 +1053,14 @@ pub fn on_draw_cursor() {
     }
     CURSOR_DRAWS.fetch_add(1, Ordering::Relaxed);
     guarded(raw as *mut c_void, false);
+
+    // Подсказку показываем руками игры — ту же самую, что в инвентаре.
+    // Её рисует `DrawPendingMouseText` в самом конце интерфейса, уже после
+    // нас, поэтому просить надо отсюда, а не из `Present`: там поздно.
+    let item = HOVER_ITEM.load(Ordering::Relaxed);
+    if item > 0 {
+        let _ = catch_unwind(AssertUnwindSafe(|| crate::input::show_item_tooltip(item)));
+    }
 }
 
 /// Отрисовка под `catch_unwind`: паника внутри чужого кадра убьёт игру.
@@ -1060,14 +1109,17 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
         }
     };
 
-    // Ввод снят в `Present`; нажатие забираем, чтобы не сработало дважды.
+    // Ввод снят в `Present`; нажатие и колесо забираем, чтобы не сработали
+    // дважды, а удержание кнопки читаем как есть — по нему тянут ползунок.
     let input = ui::Input {
         x: MOUSE_X.load(Ordering::Relaxed) as f32,
         y: MOUSE_Y.load(Ordering::Relaxed) as f32,
         clicked: MOUSE_CLICK.swap(false, Ordering::Relaxed),
+        down: MOUSE_DOWN.load(Ordering::Relaxed),
+        wheel: WHEEL.swap(0, Ordering::Relaxed),
     };
 
-    let over_ui = {
+    let frame = {
         let font = FONT.get().and_then(|f| f.as_ref());
         let atlas_guard = ICONS.lock().ok();
         let atlas = atlas_guard.as_ref().and_then(|g| g.as_ref());
@@ -1092,7 +1144,8 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
         )
     };
 
-    OVER_UI.store(over_ui, Ordering::Relaxed);
+    OVER_UI.store(frame.over_ui, Ordering::Relaxed);
+    HOVER_ITEM.store(frame.hover_item, Ordering::Relaxed);
 
     let texture_ptr = FONT_TEXTURE.load(Ordering::Relaxed);
     let block_ptr = STATE_BLOCK.load(Ordering::Relaxed);

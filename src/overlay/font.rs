@@ -163,6 +163,10 @@ pub fn build() -> Option<GameFont> {
             pixels,
             line_height: cell_h as f32,
             space_advance: advance as f32,
+            // У системного шрифта глифы кладутся в клетку целиком,
+            // так что видимая коробка совпадает с ней.
+            ink_top: 0.0,
+            ink_bottom: cell_h as f32,
             glyphs,
         })
     }
