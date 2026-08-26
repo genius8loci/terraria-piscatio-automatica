@@ -201,7 +201,9 @@ or [Telegram](https://t.me/terraria_piscatio_automatica).
 Вся техническая база — устройство DLL, механика рыбалки по декомпиляции,
 детуры, оверлей, грабли рефлексии — вынесена отдельно:
 
-**📖 [docs/research.md](docs/research.md)**
+**📖 [genius8loci.github.io/terraria-piscatio-automatica](https://genius8loci.github.io/terraria-piscatio-automatica/)**
+
+Тот же текст в репозитории — [docs/index.md](docs/index.md).
 
 Проект написан на Rust, без офсетов: до полей и методов игры добирается
 рефлексией по именам, поэтому мелкие патчи переживает.
