@@ -30,9 +30,6 @@ pub const CURSOR: i32 = -2;
 pub const PANEL: i32 = -3;
 pub const PANEL_BORDER: i32 = -4;
 pub const SLOT: i32 = -6;
-/// Переключатели — звёздочки ранга из бестиария: тусклая и золотая.
-pub const TOGGLE_OFF: i32 = -8;
-pub const TOGGLE_ON: i32 = -9;
 pub const BAR_TRACK: i32 = -10;
 pub const BAR_HANDLE: i32 = -11;
 // Ячейки инвентаря: игра держит варианты отдельными текстурами и берёт
@@ -81,6 +78,20 @@ pub const ENEMY_OFF: i32 = -27;
 /// берём верхний.
 pub const POTION_ON: i32 = -28;
 pub const POTION_OFF: i32 = -29;
+/// Строка авторыбалки: эссенция ночи (`Item_521`). Включено — крутится
+/// так же, как в инвентаре, выключено — первый кадр без цвета.
+///
+/// В файле лента из `SOUL_FRAMES` кадров сверху вниз. Кадры кладутся
+/// в атлас подряд, `SOUL_ON`, `SOUL_ON - 1` и так далее, поэтому нужный
+/// выбирается вычитанием — см. `Layout::toggle`.
+const SOUL_SHEET: i32 = -30;
+pub const SOUL_ON: i32 = -31;
+pub const SOUL_OFF: i32 = -35;
+/// Сколько кадров и сколько тиков держится каждый. Ровно как у игры:
+/// `RegisterItemAnimation(521, new DrawAnimationVertical(6, 4))`, где
+/// первый аргумент — тики на кадр, второй — число кадров.
+pub const SOUL_FRAMES: u32 = 4;
+pub const SOUL_TICKS: u32 = 6;
 
 /// Ширина рамки при девятичастной нарезке, в пикселях исходной текстуры.
 /// Для панели это раскладка самой игры: 12 + 4 + 12 = 28.
@@ -100,8 +111,7 @@ const UI_ASSETS: &[(i32, &str, Option<[u32; 4]>)] = &[
     (CROSS, "CoolDown", None),
     (SEARCH, "UI/Bestiary/Button_Search", None),
     (SEARCH_CANCEL, "UI/SearchCancel", None),
-    (TOGGLE_OFF, "UI/Bestiary/Icon_Rank_Dim", None),
-    (TOGGLE_ON, "UI/Bestiary/Icon_Rank_Light", None),
+    (SOUL_SHEET, "Item_521", None),
     (CHEST_OFF, "UI/ChestStack_0", None),
     (CHEST_ON, "UI/ChestStack_1", None),
     (LIST_WHITE, "Item_2373", None),
@@ -177,6 +187,23 @@ pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
         if let Some((_, color)) = loaded.iter().find(|(id, _)| *id == source) {
             let gray = grayscale(color);
             loaded.push((target, gray));
+        }
+    }
+    // Эссенция ночи: ленту режем на кадры, каждый кладём отдельной картинкой,
+    // и первый заодно обесцвечиваем под выключенное состояние. Саму ленту
+    // из атласа убираем — целиком она никому не нужна.
+    if let Some(index) = loaded.iter().position(|(id, _)| *id == SOUL_SHEET) {
+        let (_, sheet) = loaded.swap_remove(index);
+        let height = sheet.height / SOUL_FRAMES;
+        for frame in 0..SOUL_FRAMES {
+            let Some(part) = crop(&sheet, [0, frame * height, sheet.width, height]) else {
+                crate::log!("оверлей: кадр {frame} эссенции ночи не вырезан");
+                continue;
+            };
+            if frame == 0 {
+                loaded.push((SOUL_OFF, grayscale(&part)));
+            }
+            loaded.push((SOUL_ON - frame as i32, part));
         }
     }
 

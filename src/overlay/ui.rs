@@ -39,8 +39,6 @@ const PAD: f32 = 12.0;
 const GAP: f32 = 6.0;
 const ARROW_W: f32 = 64.0;
 const ARROW_H: f32 = 26.0;
-/// Переключатель рисуется в натуральную величину текстуры: 14 пикселей.
-const TOGGLE: f32 = 14.0;
 
 /// Пара картинок переключателя и место, которое она занимает при масштабе 1.
 #[derive(Clone, Copy)]
@@ -49,14 +47,21 @@ struct Knob {
     off: i32,
     w: f32,
     h: f32,
+    /// Сколько кадров у включённого состояния и сколько тиков держится
+    /// каждый. Один кадр — картинка неподвижна.
+    frames: u32,
+    ticks: u32,
 }
 
-/// Переключатель по умолчанию — звёздочка ранга из бестиария.
-const STAR: Knob = Knob {
-    on: icons::TOGGLE_ON,
-    off: icons::TOGGLE_OFF,
-    w: TOGGLE,
-    h: TOGGLE,
+/// Строка авторыбалки: эссенция ночи. Включено — крутится ровно так же,
+/// как в инвентаре, выключено — первый кадр без цвета. Кадр 22x28.
+const SOUL: Knob = Knob {
+    on: icons::SOUL_ON,
+    off: icons::SOUL_OFF,
+    w: 19.0,
+    h: 24.0,
+    frames: icons::SOUL_FRAMES,
+    ticks: icons::SOUL_TICKS,
 };
 /// Строка про сундуки: та же кнопка, что в инвентаре игры. Картинка 32x30,
 /// поэтому и здесь не квадрат — иначе сундук сплющило бы.
@@ -65,6 +70,8 @@ const CHEST: Knob = Knob {
     off: icons::CHEST_OFF,
     w: 24.0,
     h: 22.5,
+    frames: 1,
+    ticks: 1,
 };
 /// Режим списка в фильтре: катушка лески, светлая под белый список
 /// и притемнённая под чёрный. Картинка 30x30, место под неё квадратное.
@@ -73,6 +80,8 @@ const LIST: Knob = Knob {
     off: icons::LIST_BLACK,
     w: 22.0,
     h: 22.0,
+    frames: 1,
+    ticks: 1,
 };
 /// Строка про врагов: иконки баффов ездовых. Единорог — подсекаем,
 /// обесцвеченный скакун — нет. Картинки квадратные, 32x32.
@@ -81,6 +90,8 @@ const ENEMY: Knob = Knob {
     off: icons::ENEMY_OFF,
     w: 24.0,
     h: 24.0,
+    frames: 1,
+    ticks: 1,
 };
 /// Строка про автопитьё: чашка кофе, в цвете и без. Кадр 32x26.
 const POTION: Knob = Knob {
@@ -88,6 +99,8 @@ const POTION: Knob = Knob {
     off: icons::POTION_OFF,
     w: 24.0,
     h: 19.5,
+    frames: 1,
+    ticks: 1,
 };
 /// Насколько кнопка-переключатель выше строки — с каждой стороны.
 /// Столько же уходит в просвет между строкой и кнопкой.
@@ -356,7 +369,16 @@ impl<'a, 'b> Layout<'a, 'b> {
     /// пропорциями: у сундука 32x30, у звёздочки и катушки квадрат.
     fn toggle(&mut self, place: Rect, knob: Knob, on: bool) -> bool {
         let clicked = self.hit(place);
-        let id = if on { knob.on } else { knob.off };
+        // Кадры включённой картинки лежат в атласе подряд, поэтому нужный
+        // выбирается вычитанием. Счёт идёт по кадрам отрисовки — они же
+        // тики игры, так что скорость выходит ровно как в инвентаре.
+        let id = if !on {
+            knob.off
+        } else if knob.frames > 1 {
+            knob.on - ((self.frames / knob.ticks.max(1)) % knob.frames) as i32
+        } else {
+            knob.on
+        };
         // Картинка не во всю кнопку: во всю она выглядит громоздкой, а поле
         // вокруг неё заодно оставляет место золотой рамке наведения.
         // Нажимается при этом вся кнопка целиком.
@@ -665,7 +687,7 @@ pub fn build(
             colors::RARE_ORANGE,
         ),
     };
-    if layout.switch_row_note(r, t.auto_fish, &note, note_color, STAR, auto_fish) {
+    if layout.switch_row_note(r, t.auto_fish, &note, note_color, SOUL, auto_fish) {
         state::with(|s| {
             s.auto_fish = !s.auto_fish;
             s.dirty = true;
