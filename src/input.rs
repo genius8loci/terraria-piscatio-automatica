@@ -97,6 +97,12 @@ struct TooltipApi {
     /// `Item.netDefaults` — единственная неперегруженная настройка по id.
     net_defaults: Method,
     rare: Field,
+    /// `Main.instance` и `Main.MouseTextNoOverride` — ими игра показывает
+    /// подсказку простым текстом, без предмета. Ровно так подписана кнопка
+    /// «разложить по сундукам» в инвентаре. Необязательны: не нашлись —
+    /// пропадёт только текстовая подсказка, подсказки предметов останутся.
+    instance: Field,
+    mouse_text: Option<Method>,
 }
 
 /// Предмет, о котором сейчас рассказывает подсказка.
@@ -292,6 +298,8 @@ fn tooltip_api(assembly: &Assembly, main: &Type) -> Option<TooltipApi> {
         clone: item.method("Clone").ok()?,
         net_defaults: item.method("netDefaults").ok()?,
         rare: item.field("rare").ok()?,
+        instance: main.field("instance").ok()?,
+        mouse_text: main.method("MouseTextNoOverride").ok(),
     })
 }
 
@@ -443,6 +451,43 @@ pub fn show_item_tooltip(id: i32) {
         return;
     }
     let _ = api.hover_item.set_static(Var::object(&hovered.item));
+}
+
+/// Показывает подсказку простым текстом — ту же, что у кнопок инвентаря.
+///
+/// `Main.MouseTextNoOverride(string, int, byte, int, int, int, int, int)`:
+/// все семь хвостовых параметров со значениями по умолчанию, но рефлексия
+/// их не подставляет, поэтому передаём ровно то, что подставил бы компилятор.
+/// Звать только с игрового потока, изнутри отрисовки интерфейса.
+pub fn show_text_tooltip(text: &str) {
+    let Some(handles) = handles() else {
+        return;
+    };
+    let Some(api) = handles.tooltip.as_ref() else {
+        return;
+    };
+    let Some(mouse_text) = api.mouse_text.as_ref() else {
+        return;
+    };
+    let Ok(instance) = api.instance.get_static() else {
+        return;
+    };
+    if instance.is_null() {
+        return;
+    }
+    let _ = mouse_text.invoke(
+        &instance,
+        &[
+            Var::text(text),
+            Var::int(0),
+            Var::byte(0),
+            Var::int(-1),
+            Var::int(-1),
+            Var::int(-1),
+            Var::int(-1),
+            Var::int(0),
+        ],
+    );
 }
 
 /// Отдаёт строку поиска игре на правку: она сама разберёт нажатия,

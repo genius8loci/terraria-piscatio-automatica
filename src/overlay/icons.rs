@@ -63,6 +63,13 @@ pub const FRAME_SMALL: i32 = -19;
 /// обычный, `ChestStack_1` подсвечен (`Main.DrawInventory`, `num80`).
 pub const CHEST_OFF: i32 = -21;
 pub const CHEST_ON: i32 = -22;
+/// Режим списка в фильтре: катушка «Высокопрочной лески» (`Item_2373`).
+/// Светлая — белый список, притемнённая — чёрный. Вторая делается из первой
+/// в `darkened`, отдельной картинки в игре под неё нет.
+pub const LIST_WHITE: i32 = -23;
+pub const LIST_BLACK: i32 = -24;
+/// Насколько притемняется катушка под чёрный список, по каналу.
+const LIST_DARKEN: u8 = 80;
 
 /// Ширина рамки при девятичастной нарезке, в пикселях исходной текстуры.
 /// Для панели это раскладка самой игры: 12 + 4 + 12 = 28.
@@ -86,6 +93,7 @@ const UI_ASSETS: &[(i32, &str, Option<[u32; 4]>)] = &[
     (TOGGLE_ON, "UI/Bestiary/Icon_Rank_Light", None),
     (CHEST_OFF, "UI/ChestStack_0", None),
     (CHEST_ON, "UI/ChestStack_1", None),
+    (LIST_WHITE, "Item_2373", None),
     // Золотая рамка из бестиария: ей игра показывает наведение на кнопку.
     (FRAME_SMALL, "UI/Bestiary/Button_Search_Border", None),
     (BAR_TRACK, "UI/Scrollbar", None),
@@ -140,6 +148,13 @@ pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
             },
             None => loaded.push((*id, image)),
         }
+    }
+    // Чёрный список — та же катушка, только притемнённая. Умножением цветом
+    // при отрисовке так не получится: у светлых пикселей и у тёмных разница
+    // одна и та же, а множитель растянул бы её в разы.
+    if let Some((_, light)) = loaded.iter().find(|(id, _)| *id == LIST_WHITE) {
+        let dark = darkened(light, LIST_DARKEN);
+        loaded.push((LIST_BLACK, dark));
     }
 
     for &(id, frames) in items {
@@ -208,6 +223,25 @@ pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
         pixels,
         map,
     })
+}
+
+/// Та же картинка темнее: из каждого канала вычитается одно и то же,
+/// прозрачность не трогается. Вычитание, а не умножение: так светлые места
+/// уходят в тень вместе с тёмными и рисунок остаётся читаемым.
+fn darkened(image: &xnb::Image, by: u8) -> xnb::Image {
+    let pixels = image
+        .pixels
+        .iter()
+        .map(|&p| {
+            let channel = |shift: u32| (((p >> shift) & 0xFF) as u8).saturating_sub(by) as u32;
+            (p & 0xFF00_0000) | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+        })
+        .collect();
+    xnb::Image {
+        width: image.width,
+        height: image.height,
+        pixels,
+    }
 }
 
 /// Кусок картинки; за границы не выходим, иначе пропускаем.

@@ -25,7 +25,7 @@ mod xnb;
 
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use minhook::MinHook;
@@ -110,6 +110,8 @@ pub mod colors {
     pub const RARE_ORANGE: u32 = 0xFF_FFC896;
     pub const TEXT: u32 = 0xFF_FFFFFF;
     pub const MUTED: u32 = 0xFF_A2A8CE;
+    /// Подсказка в пустом поле ввода: `UISearchBar` красит её `Color.Gray`.
+    pub const HINT: u32 = 0xFF_808080;
     pub const VALUE: u32 = 0xFF_FFE745;
     pub const ON: u32 = 0xFF_8CE79A;
     /// Иконка выключенного зелья приглушается.
@@ -192,6 +194,8 @@ static WHEEL: AtomicI32 = AtomicI32::new(0);
 static OVER_UI: AtomicBool = AtomicBool::new(false);
 /// Предмет под курсором; `0` — ничего. По нему показывается подсказка игры.
 static HOVER_ITEM: AtomicI32 = AtomicI32::new(0);
+/// Своя подсказка под курсором, кодом; `ui::HINT_NONE` — ничего.
+static HOVER_HINT: AtomicU8 = AtomicU8::new(ui::HINT_NONE);
 /// Курсор стоит в строке поиска: клавиши сейчас про текст, и хоткеи
 /// рабочего потока трогать нельзя — иначе Delete выгрузит DLL при наборе.
 static TYPING: AtomicBool = AtomicBool::new(false);
@@ -567,6 +571,7 @@ unsafe fn present(
         } else {
             OVER_UI.store(false, Ordering::Relaxed);
             HOVER_ITEM.store(0, Ordering::Relaxed);
+            HOVER_HINT.store(ui::HINT_NONE, Ordering::Relaxed);
             // Иначе нажатие, сделанное при скрытой панели, сработает,
             // как только её покажут.
             MOUSE_CLICK.store(false, Ordering::Relaxed);
@@ -1107,6 +1112,11 @@ pub fn on_draw_cursor() {
     if item > 0 {
         let _ = catch_unwind(AssertUnwindSafe(|| crate::input::show_item_tooltip(item)));
     }
+    // Своя подсказка — тем же путём, только простым текстом: так игра
+    // подписывает свои кнопки в инвентаре.
+    if let Some(text) = ui::hint_text(HOVER_HINT.load(Ordering::Relaxed)) {
+        let _ = catch_unwind(AssertUnwindSafe(|| crate::input::show_text_tooltip(text)));
+    }
 
     // Набор в строке поиска игра разбирает сама — оттуда же, откуда это
     // делают её собственные поля ввода, то есть из отрисовки интерфейса.
@@ -1116,7 +1126,7 @@ pub fn on_draw_cursor() {
 }
 
 /// Забирает у игры новое значение строки поиска.
-fn pump_search_text() {
+pub(crate) fn pump_search_text() {
     let Ok(mut guard) = UI.lock() else {
         return;
     };
@@ -1243,6 +1253,7 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
 
     OVER_UI.store(frame.over_ui, Ordering::Relaxed);
     HOVER_ITEM.store(frame.hover_item, Ordering::Relaxed);
+    HOVER_HINT.store(frame.hint, Ordering::Relaxed);
     TYPING.store(frame.typing, Ordering::Relaxed);
 
     let texture_ptr = FONT_TEXTURE.load(Ordering::Relaxed);

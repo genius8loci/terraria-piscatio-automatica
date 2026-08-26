@@ -78,6 +78,14 @@ const CHEST: Knob = Knob {
     w: 24.0,
     h: 22.5,
 };
+/// Режим списка в фильтре: катушка лески, светлая под белый список
+/// и притемнённая под чёрный. Картинка 30x30, место под неё квадратное.
+const LIST: Knob = Knob {
+    on: icons::LIST_WHITE,
+    off: icons::LIST_BLACK,
+    w: 22.0,
+    h: 22.0,
+};
 /// Самая широкая картинка переключателя — по ней считается место,
 /// которое надо оставить справа от подписи.
 const KNOB_MAX: f32 = CHEST.w;
@@ -91,6 +99,10 @@ const SEARCH_GAP: f32 = 3.0;
 /// заметно ниже наших строк: там одна короткая надпись, а не подпись
 /// с переключателем.
 const SEARCH_H: f32 = 24.0;
+/// Насколько текст в поле мельче остального: `new UISearchBar(text, 0.8f)`.
+const SEARCH_TEXT: f32 = 0.8;
+/// Сторона крестика «стереть»: `UI/SearchCancel` в натуральную величину.
+const SEARCH_CANCEL_SIZE: f32 = 24.0;
 /// Полпериода мигания курсора ввода, в кадрах.
 const BLINK: u32 = 30;
 /// Поле от нижнего края экрана, ниже которого окно фильтра не растёт.
@@ -145,6 +157,22 @@ pub struct Input {
     pub wheel: i32,
 }
 
+/// Своя подсказка под курсором — не про предмет, а про то, почему ячейка
+/// не нажимается. Между кадром и просьбой к игре значение живёт в атомике,
+/// поэтому это код, а не строка; сам текст — в `hint_text`.
+pub const HINT_NONE: u8 = 0;
+pub const HINT_NO_POTION: u8 = 1;
+
+/// Текст подсказки по её коду.
+pub fn hint_text(hint: u8) -> Option<&'static str> {
+    match hint {
+        HINT_NO_POTION => Some(
+            "Этого зелья нет в инвентаре.\nПоложите его в инвентарь, чтобы включить автопитьё.",
+        ),
+        _ => None,
+    }
+}
+
 /// Что кадр рассказал наружу.
 #[derive(Clone, Copy, Default)]
 pub struct Frame {
@@ -152,6 +180,8 @@ pub struct Frame {
     pub over_ui: bool,
     /// Предмет под курсором; `0` — ничего.
     pub hover_item: i32,
+    /// Своя подсказка под курсором; `HINT_NONE` — ничего.
+    pub hint: u8,
     /// Курсор стоит в строке поиска: клавиши сейчас про текст.
     pub typing: bool,
 }
@@ -180,6 +210,10 @@ pub struct Layout<'a, 'b> {
     pub over_ui: bool,
     /// Предмет под курсором — по нему покажем подсказку игры.
     pub hover_item: i32,
+    /// Своя подсказка под курсором, кодом; `HINT_NONE` — нет.
+    pub hint: u8,
+    /// В этом кадре кликнули по строке поиска. Клик мимо неё снимает фокус.
+    pub clicked_search: bool,
 }
 
 impl<'a, 'b> Layout<'a, 'b> {
@@ -432,6 +466,8 @@ pub fn build(
         frames,
         over_ui: false,
         hover_item: 0,
+        hint: HINT_NONE,
+        clicked_search: false,
     };
 
     // Ширину задаёт содержимое: самая длинная подпись или заголовок из
@@ -485,6 +521,7 @@ pub fn build(
         return Frame {
             over_ui: layout.over_ui,
             hover_item: 0,
+            hint: HINT_NONE,
             typing: false,
         };
     }
@@ -533,21 +570,34 @@ pub fn build(
         r
     };
 
-    let (auto_fish, quick_stack, auto_potions, enemies, cast, aim, recast, free, potions) =
-        state::with(|s| {
-            (
-                s.auto_fish,
-                s.quick_stack,
-                s.auto_potions,
-                s.pull_enemy_spawns,
-                s.status.bobber_cast,
-                s.status.aim,
-                s.status.recast,
-                s.status.free_slots,
-                s.potions,
-            )
-        })
-        .unwrap_or((false, true, false, false, false, None, false, -1, [false; 3]));
+    let (
+        auto_fish,
+        quick_stack,
+        auto_potions,
+        enemies,
+        cast,
+        aim,
+        recast,
+        free,
+        potions,
+        potions_missing,
+    ) = state::with(|s| {
+        (
+            s.auto_fish,
+            s.quick_stack,
+            s.auto_potions,
+            s.pull_enemy_spawns,
+            s.status.bobber_cast,
+            s.status.aim,
+            s.status.recast,
+            s.status.free_slots,
+            s.potions,
+            s.status.potions_missing,
+        )
+    })
+    .unwrap_or((
+        false, true, false, false, false, None, false, -1, [false; 3], [false; 3],
+    ));
 
     // Точка заброса важна настолько, что выносится прямо в подпись:
     // пока она не запомнена, автомат ничего не делает и молча ждёт.
@@ -555,10 +605,7 @@ pub fn build(
     let (note, note_color) = match (auto_fish, aim, recast) {
         (false, _, _) => (String::new(), colors::TEXT),
         // Включились при уже заброшенном поплавке: по нему точку не взять.
-        (true, _, true) => (
-            " (забросьте удочку заново)".to_string(),
-            colors::RARE_GREEN,
-        ),
+        (true, _, true) => (" (забросьте удочку заново)".to_string(), colors::RARE_GREEN),
         (true, None, _) => (
             " (жду первого броска удочки)".to_string(),
             colors::RARE_GREEN,
@@ -656,6 +703,18 @@ pub fn build(
             h: slot,
         };
         let on = potions[index];
+        // Зелья нет в инвентаре — ячейка не нажимается: включать питьё тем,
+        // чего нет, бессмысленно. Показываем это так же, как отвергнутый
+        // предмет в фильтре, и объясняем подсказкой.
+        if potions_missing[index] {
+            if layout.hovered(cell) {
+                layout.over_ui = true;
+                layout.hint = HINT_NO_POTION;
+            }
+            layout.item_cell(cell, *item, Mark::Deny);
+            slot_x += slot + GAP * scale;
+            continue;
+        }
         if layout.hit_item(cell, *item) {
             state::with(|s| {
                 s.potions[index] = !s.potions[index];
@@ -714,13 +773,28 @@ pub fn build(
 
     let below = main.y + main.h + GAP * 2.0 * scale;
     match ui.tab {
-        Tab::Filter => filter_window(&mut layout, ui, x, below, panel_w, screen.1, scale, slot),
+        Tab::Filter => filter_window(
+            &mut layout,
+            ui,
+            x,
+            below,
+            panel_w,
+            screen.1,
+            scale,
+            ui_scale,
+            slot,
+        ),
         Tab::Stats => stats_window(&mut layout, x, below, panel_w, scale),
         Tab::None => {}
     }
 
     if own_cursor {
         layout.draw_cursor();
+    }
+    // Клик мимо строки поиска снимает фокус, но набранного не стирает —
+    // ровно так ведёт себя поле игры.
+    if input.clicked && !layout.clicked_search {
+        ui.search_focus = false;
     }
     // Курсор в строке поиска имеет смысл только при открытом фильтре.
     if ui.tab != Tab::Filter {
@@ -729,6 +803,7 @@ pub fn build(
     Frame {
         over_ui: layout.over_ui,
         hover_item: layout.hover_item,
+        hint: layout.hint,
         typing: ui.search_focus,
     }
 }
@@ -745,6 +820,7 @@ fn filter_window(
     panel_w: f32,
     screen_h: f32,
     scale: f32,
+    ui_scale: f32,
     cell: f32,
 ) {
     // Поиск по именам: их спрашивает у игры рабочий поток при подключении.
@@ -769,7 +845,10 @@ fn filter_window(
     let pad = (PAD * scale).round();
     let gap = (GAP * scale).round();
     let row_h = (ROW_H * scale).round();
-    let search_h = (SEARCH_H * scale).round();
+    // Строка поиска — единственная, что живёт по меркам самой игры, без
+    // нашего уплотнения: у неё готовые картинки в натуральную величину,
+    // и на нашем масштабе она выходила на пару пикселей ниже оригинала.
+    let search_h = (SEARCH_H * ui_scale).round();
     let margin = (SCREEN_MARGIN * scale).round();
 
     // Сколько строк вообще можно показать, чтобы окно влезло в экран.
@@ -828,12 +907,13 @@ fn filter_window(
         w: inner_w,
         h: row_h,
     };
+    // Подписи короткие: катушка шире звёздочки, и прежние наезжали на неё.
     let label = if whitelist {
-        "Список: белый — беру только отмеченное зелёным"
+        "Белый список: беру только зелёное"
     } else {
-        "Список: чёрный — беру всё, кроме отмеченного красным"
+        "Чёрный список: беру всё, кроме красного"
     };
-    if layout.switch_row(r, label, whitelist) {
+    if layout.switch_row_knob(r, label, LIST, whitelist) {
         state::with(|s| {
             s.whitelist_mode = !s.whitelist_mode;
             s.dirty = true;
@@ -848,7 +928,7 @@ fn filter_window(
         w: inner_w,
         h: search_h,
     };
-    search_field(layout, ui, search, scale);
+    search_field(layout, ui, search, ui_scale);
     cursor += search_h + gap;
 
     // Сетку центрируем: остаток от деления уходит в поля.
@@ -900,8 +980,14 @@ fn filter_window(
 /// Наведение и фокус берутся золотой рамкой — это готовые картинки игры,
 /// `Button_Search_Border` и `Button_Wide_Border`. Сам ввод разбирает игра,
 /// см. `input::edit_text`.
-fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
-    let gap = (SEARCH_GAP * scale).round();
+fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, ui_scale: f32) {
+    // Клик куда угодно в этой строке — «по поиску»: снаружи по нему решают,
+    // снимать ли фокус.
+    if layout.input.clicked && layout.hovered(r) {
+        layout.clicked_search = true;
+    }
+
+    let gap = (SEARCH_GAP * ui_scale).round();
     let button = Rect {
         x: r.x,
         y: r.y,
@@ -919,7 +1005,7 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
     // Своей подложки под неё не кладём: `Button_Search` — это уже готовая
     // кнопка вместе с тёмным скруглённым фоном, и вторая коробка под ней
     // выглядела значком, забытым в ячейке.
-    let pad = (PAD * 0.4 * scale).round();
+    let pad = (PAD * 0.4 * ui_scale).round();
     layout.painter.stretch(
         icons::SEARCH,
         button.x,
@@ -929,8 +1015,10 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
         colors::PLAIN,
     );
     let over_button = layout.hovered(button);
+    // Значок переключает фокус, а не только ставит: второй щелчок по нему
+    // убирает курсор ввода. Это `Click_SearchArea` -> `ToggleTakingText`.
     if layout.hit(button) {
-        ui.search_focus = true;
+        ui.search_focus = !ui.search_focus;
     }
     // Рамка только под курсором: это `SetHoverImage`, а не отметка фокуса.
     if over_button {
@@ -939,7 +1027,6 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
 
     // --- само поле ---------------------------------------------------------
     // Попадание считаем до отрисовки: от фокуса зависит цвет обводки.
-    let icon = (field.h - pad * 2.0).round();
     if layout.hit(field) {
         ui.search_focus = true;
     }
@@ -972,13 +1059,17 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
     );
 
     // Крестик стирает набранное; появляется, только когда есть что стирать.
+    // Размер у него свой, натуральный: игра кладёт `SearchCancel` как есть,
+    // прижав к правому краю с отступом в два пикселя.
     let mut text_w = field.w - pad * 2.0;
     if !ui.search.is_empty() {
+        let side = (SEARCH_CANCEL_SIZE * ui_scale).round();
+        let inset = (2.0 * ui_scale).round();
         let cancel = Rect {
-            x: field.x + field.w - icon - pad,
-            y: field.y + pad,
-            w: icon,
-            h: icon,
+            x: field.x + field.w - side - inset,
+            y: (field.y + (field.h - side) * 0.5).round(),
+            w: side,
+            h: side,
         };
         let hovered = layout.hovered(cancel);
         if layout.hit(cancel) {
@@ -997,16 +1088,22 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
                 colors::MUTED
             },
         );
-        text_w -= icon + pad;
+        text_w -= side + inset;
     }
 
-    // Подсказка стоит, пока не начали набирать, — и при курсоре в строке тоже.
+    // Текст в поле игра пишет мельче остального интерфейса: `UISearchBar`
+    // заводится с `scale = 0.8f`. Пустую подсказку она красит в `Color.Gray`,
+    // набранное — в белый.
+    let text_scale = (ui_scale * SEARCH_TEXT).max(0.4);
+    let outer_scale = layout.painter.scale;
+    layout.painter.scale = text_scale;
+
     let text_x = field.x + pad * 2.0;
     let mut pen = text_x;
     if ui.search.is_empty() {
         layout
             .painter
-            .text_left(pen, field.y, field.h, SEARCH_HINT, colors::MUTED);
+            .text_left(pen, field.y, field.h, SEARCH_HINT, colors::HINT);
         pen += layout.painter.measure(SEARCH_HINT);
     } else {
         // Длинную строку показываем хвостом: набирают-то в конце.
@@ -1026,13 +1123,14 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
     if ui.search_focus && layout.blink() {
         let line = (field.h * 0.55).round();
         layout.painter.rect(
-            (pen + 2.0 * scale).round(),
+            (pen + 2.0 * text_scale).round(),
             (field.y + (field.h - line) * 0.5).round(),
-            (2.0 * scale).round().max(1.0),
+            (2.0 * text_scale).round().max(1.0),
             line,
             colors::TEXT,
         );
     }
+    layout.painter.scale = outer_scale;
 }
 
 /// Полоса прокрутки как у игры: ползунок таскается мышью, клик мимо него

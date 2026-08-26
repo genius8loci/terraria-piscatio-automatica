@@ -313,14 +313,22 @@ impl Fishing {
             state::with(|s| {
                 s.status.bait = -1;
                 s.status.free_slots = -1;
+                s.status.potions_missing = [false; 3];
             });
             return (-1, -1);
         };
         let bait = game.bait_total(&player).unwrap_or(-1);
         let free = game.free_slots(&player).unwrap_or(-1);
+        // Зелья пересчитываем здесь же: панель гасит ячейки тех, что кончились,
+        // и делать это надо на ходу — запас тает прямо во время рыбалки.
+        let mut missing = [false; 3];
+        for (index, (item, _, _)) in POTIONS.iter().enumerate() {
+            missing[index] = matches!(game.find_item(&player, *item), Ok(None));
+        }
         state::with(|s| {
             s.status.bait = bait;
             s.status.free_slots = free;
+            s.status.potions_missing = missing;
         });
         (bait, free)
     }

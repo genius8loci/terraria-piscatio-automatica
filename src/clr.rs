@@ -29,7 +29,8 @@ use windows::Win32::System::Ole::{
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::System::Variant::{
     VARENUM, VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_ARRAY, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_I4,
-    VT_INT, VT_INT_PTR, VT_NULL, VT_R4, VT_UINT, VT_UINT_PTR, VT_UNKNOWN, VT_VARIANT, VariantClear,
+    VT_INT, VT_INT_PTR, VT_NULL, VT_R4, VT_UI1, VT_UINT, VT_UINT_PTR, VT_UNKNOWN, VT_VARIANT,
+    VariantClear,
 };
 use windows::core::{BSTR, GUID, HRESULT, IUnknown, Interface, PWSTR, Result, w};
 
@@ -169,6 +170,13 @@ impl Var {
     #[allow(dead_code)]
     pub fn float(x: f32) -> Self {
         Var(build(VT_R4, VARIANT_0_0_0 { fltVal: x }))
+    }
+
+    /// Байт отдельным типом: у `MouseTextNoOverride` параметр `byte`, а
+    /// стандартный биндер рефлексии сужающих преобразований не делает —
+    /// `Int32` в `Byte` он не пропустит.
+    pub fn byte(x: u8) -> Self {
+        Var(build(VT_UI1, VARIANT_0_0_0 { bVal: x }))
     }
 
     pub fn boolean(x: bool) -> Self {
