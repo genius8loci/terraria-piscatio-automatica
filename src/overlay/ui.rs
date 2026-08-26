@@ -533,7 +533,7 @@ pub fn build(
         r
     };
 
-    let (auto_fish, quick_stack, auto_potions, enemies, cast, aim, free, potions) =
+    let (auto_fish, quick_stack, auto_potions, enemies, cast, aim, recast, free, potions) =
         state::with(|s| {
             (
                 s.auto_fish,
@@ -542,22 +542,28 @@ pub fn build(
                 s.pull_enemy_spawns,
                 s.status.bobber_cast,
                 s.status.aim,
+                s.status.recast,
                 s.status.free_slots,
                 s.potions,
             )
         })
-        .unwrap_or((false, true, false, false, false, None, -1, [false; 3]));
+        .unwrap_or((false, true, false, false, false, None, false, -1, [false; 3]));
 
     // Точка заброса важна настолько, что выносится прямо в подпись:
     // пока она не запомнена, автомат ничего не делает и молча ждёт.
     let r = next_row(&mut cursor);
-    let (note, note_color) = match (auto_fish, aim) {
-        (false, _) => (String::new(), colors::TEXT),
-        (true, None) => (
+    let (note, note_color) = match (auto_fish, aim, recast) {
+        (false, _, _) => (String::new(), colors::TEXT),
+        // Включились при уже заброшенном поплавке: по нему точку не взять.
+        (true, _, true) => (
+            " (забросьте удочку заново)".to_string(),
+            colors::RARE_GREEN,
+        ),
+        (true, None, _) => (
             " (жду первого броска удочки)".to_string(),
             colors::RARE_GREEN,
         ),
-        (true, Some((ax, ay))) => (format!(" (зафиксировано {ax}:{ay})"), colors::RARE_ORANGE),
+        (true, Some((ax, ay)), _) => (format!(" (зафиксировано {ax}:{ay})"), colors::RARE_ORANGE),
     };
     if layout.switch_row_note(r, "Авторыбалка", &note, note_color, STAR, auto_fish) {
         state::with(|s| {

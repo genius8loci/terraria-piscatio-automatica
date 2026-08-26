@@ -35,6 +35,9 @@ pub struct Status {
     pub bobber_cast: bool,
     /// Куда забрасываем. `None` — ждём, пока игрок бросит удочку сам.
     pub aim: Option<(i32, i32)>,
+    /// Включились, когда поплавок уже лежал в воде: точку заброса по нему
+    /// не взять, курсор к тому времени где угодно. Ждём нового заброса.
+    pub recast: bool,
     pub free_slots: i32,
     pub bait: i32,
     pub detour_ready: bool,

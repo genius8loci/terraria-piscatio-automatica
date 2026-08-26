@@ -34,6 +34,9 @@ const POTION_INTERVAL: Duration = Duration::from_secs(3);
 pub struct Fishing {
     /// Экранные координаты первого заброса.
     aim: Option<(i32, i32)>,
+    /// Ждём именно нового заброса: тот поплавок, что сейчас в воде, был
+    /// заброшен до включения, и курсор с тех пор уехал.
+    wait_recast: bool,
     next_action: Instant,
     hint: Option<i32>,
     last_bite: i32,
@@ -69,6 +72,7 @@ impl Fishing {
     pub fn new() -> Self {
         Fishing {
             aim: None,
+            wait_recast: false,
             next_action: Instant::now(),
             hint: None,
             last_bite: 0,
@@ -103,6 +107,13 @@ impl Fishing {
     /// Заодно на каждом запуске забывается точка заброса. Иначе неудачный
     /// первый бросок запоминался навсегда, и автомат долбил в ту же
     /// неудачную точку даже после перезапуска.
+    ///
+    /// И поднимается `wait_recast`: включить могли при уже заброшенном
+    /// поплавке, а курсор к этому мгновению стоит где угодно — обычно
+    /// прямо на переключателе в панели. Взять по нему точку заброса значит
+    /// взять заведомо неверную. Флаг снимается там же, где выясняется, что
+    /// поплавка в воде нет (см. `tick`), так что при пустой воде он живёт
+    /// доли тика и ничего не задерживает.
     fn track_session(&mut self) {
         let enabled = self.enabled();
         match (enabled, self.session_start) {
@@ -110,6 +121,7 @@ impl Fishing {
                 self.session_start = Some(Instant::now());
                 self.session_seconds = 0;
                 self.aim = None;
+                self.wait_recast = true;
                 self.stopped = None;
                 self.stack_tries = 0;
                 log!("рыбалка включена: жду первый заброс вручную");
@@ -118,6 +130,7 @@ impl Fishing {
             (false, Some(_)) => {
                 self.session_start = None;
                 self.aim = None;
+                self.wait_recast = false;
             }
             (false, None) => {}
         }
@@ -133,6 +146,9 @@ impl Fishing {
         }
         if !detour::is_active() {
             return "детур не стоит — нажимать некому".to_string();
+        }
+        if self.wait_recast {
+            return "поплавок уже был в воде — жду нового заброса".to_string();
         }
         if self.aim.is_none() {
             return "жду первый заброс вручную".to_string();
@@ -218,6 +234,10 @@ impl Fishing {
             }
             Ok(None) => {
                 self.hint = None;
+                // Воды без поплавка достаточно: следующий, который в ней
+                // появится, заброшен уже при включённой рыбалке, и курсор
+                // в это мгновение стоит там, куда игрок целился.
+                self.wait_recast = false;
                 state::with(|s| s.status.bobber_cast = false);
                 self.on_idle(game, config);
             }
@@ -233,6 +253,7 @@ impl Fishing {
         state::with(|s| {
             s.status.fishing = status;
             s.status.aim = self.aim;
+            s.status.recast = self.wait_recast;
             s.stats.seconds = self.session_seconds;
             s.stats.caught = self.pulls;
             s.stats.skipped = self.skips;
@@ -270,8 +291,11 @@ impl Fishing {
     }
 
     /// Первый заброс делает игрок — оттуда и берём точку прицела.
+    ///
+    /// Тот поплавок, что лежал в воде до включения, не в счёт: курсор с его
+    /// заброса давно уехал, и точка вышла бы заведомо неверной.
     fn remember_aim(&mut self, game: &Game) {
-        if self.aim.is_some() {
+        if self.aim.is_some() || self.wait_recast {
             return;
         }
         match game.mouse() {
