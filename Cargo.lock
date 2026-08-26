@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "terraria-piscatio-automatica"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "lzxd",
  "minhook",

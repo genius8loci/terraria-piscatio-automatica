@@ -29,7 +29,6 @@ pub const WHITE: i32 = -1;
 pub const CURSOR: i32 = -2;
 pub const PANEL: i32 = -3;
 pub const PANEL_BORDER: i32 = -4;
-pub const INNER_PANEL: i32 = -5;
 pub const SLOT: i32 = -6;
 /// Переключатели — звёздочки ранга из бестиария: тусклая и золотая.
 pub const TOGGLE_OFF: i32 = -8;
@@ -43,8 +42,10 @@ pub const BAR_HANDLE: i32 = -11;
 // и слоты, куда предмет положить можно или нельзя.
 pub const SLOT_MARK: i32 = -12;
 pub const SLOT_HOVER: i32 = -13;
-/// Красный крестик поверх отвергнутого предмета. Своей такой картинки
-/// у игры нет, поэтому рисуем её сами — зато одним квадом, а не лесенкой.
+/// Красный крестик поверх отвергнутого предмета — тот самый, что игра
+/// кладёт на неразблокированное в меню дублирования: `Content/Images/CoolDown`
+/// (`TextureAssets.Cd`), см. `ItemSlot.Draw`, ветка контекста 34
+/// `CreativeInfiniteLocked`.
 pub const CROSS: i32 = -14;
 pub const SEARCH: i32 = -15;
 pub const SEARCH_CANCEL: i32 = -16;
@@ -61,7 +62,6 @@ pub const FRAME_WIDE: i32 = -20;
 /// Ширина рамки при девятичастной нарезке, в пикселях исходной текстуры.
 /// Для панели это раскладка самой игры: 12 + 4 + 12 = 28.
 pub const PANEL_INSET: f32 = 12.0;
-pub const INNER_INSET: f32 = 8.0;
 pub const BAR_INSET: f32 = 6.0;
 /// Уголки золотых рамок: у обеих скругление в шесть пикселей.
 pub const FRAME_INSET: f32 = 6.0;
@@ -71,10 +71,10 @@ const UI_ASSETS: &[(i32, &str, Option<[u32; 4]>)] = &[
     (CURSOR, "UI/Cursor_0", None),
     (PANEL, "UI/PanelBackground", None),
     (PANEL_BORDER, "UI/PanelBorder", None),
-    (INNER_PANEL, "UI/InnerPanelBackground", None),
     (SLOT, "Inventory_Back", None),
     (SLOT_MARK, "Inventory_Back15", None),
     (SLOT_HOVER, "Inventory_Back13", None),
+    (CROSS, "CoolDown", None),
     (SEARCH, "UI/Bestiary/Button_Search", None),
     (SEARCH_CANCEL, "UI/SearchCancel", None),
     (TOGGLE_OFF, "UI/Bestiary/Icon_Rank_Dim", None),
@@ -119,7 +119,6 @@ pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
     let mut loaded: Vec<(i32, xnb::Image)> = Vec::with_capacity(items.len() + UI_ASSETS.len() + 1);
 
     loaded.push((WHITE, white_block()));
-    loaded.push((CROSS, cross_block()));
     loaded.push((CHEVRON_UP, chevron_block(true)));
     loaded.push((CHEVRON_DOWN, chevron_block(false)));
     for (id, name, cut) in UI_ASSETS {
@@ -266,46 +265,6 @@ fn chevron_block(up: bool) -> xnb::Image {
     for y in tip..(tip + THICK).min(SIZE) {
         for x in (arms * STEP)..(SIZE - arms * STEP) {
             pixels[(y * SIZE + x) as usize] = 0xFFFF_FFFF;
-        }
-    }
-    xnb::Image {
-        width: SIZE,
-        height: SIZE,
-        pixels,
-    }
-}
-
-/// Косой крест с тёмной обводкой — так нарисована вся мелкая графика игры:
-/// светлое ядро в один-два пикселя и контур вокруг. Без контура крест
-/// теряется на пёстрых иконках.
-///
-/// Ядро белое, цвет ему задаётся при отрисовке; обводка своя, чёрная.
-fn cross_block() -> xnb::Image {
-    const SIZE: u32 = 24;
-    /// Полутолщина ядра и всего штриха вместе с обводкой, в пикселях.
-    const CORE: f32 = 1.1;
-    const EDGE: f32 = 2.3;
-
-    let mut pixels = vec![0u32; (SIZE * SIZE) as usize];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            // Расстояние до ближней из двух диагоналей квадрата.
-            let down = (fx - fy).abs();
-            let up = (fx + fy - SIZE as f32).abs();
-            let near = down.min(up) / std::f32::consts::SQRT_2;
-            if near > EDGE {
-                continue;
-            }
-            let pixel = if near <= CORE {
-                0xFFFF_FFFF
-            } else {
-                // Обводка гаснет к краю: ступеньки на масштабе выглядят
-                // грубее, чем мягкий край.
-                let alpha = ((EDGE - near).min(1.0) * 255.0) as u32;
-                alpha << 24
-            };
-            pixels[(y * SIZE + x) as usize] = pixel;
         }
     }
     xnb::Image {

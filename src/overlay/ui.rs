@@ -53,12 +53,12 @@ const ARROW_W: f32 = 64.0;
 const ARROW_H: f32 = 26.0;
 /// Переключатель рисуется в натуральную величину текстуры: 14 пикселей.
 const TOGGLE: f32 = 14.0;
-/// Доля ячейки под крестик «пропускаю».
-const CROSS_SIZE: f32 = 0.7;
 /// Сторона уголка на кнопке сворачивания.
 const CHEVRON: f32 = 16.0;
 /// Подсказка в пустой строке поиска — как у игры в её собственных полях.
 const SEARCH_HINT: &str = "Имя:";
+/// Просвет между кнопкой поиска и полем: у игры ровно три пикселя.
+const SEARCH_GAP: f32 = 3.0;
 /// Полпериода мигания курсора ввода, в кадрах.
 const BLINK: u32 = 30;
 /// Поле от нижнего края экрана, ниже которого окно фильтра не растёт.
@@ -210,16 +210,19 @@ impl<'a, 'b> Layout<'a, 'b> {
         );
     }
 
-    /// Строка внутри окна — та же подложка, что у списков игры.
+    /// Строка внутри окна. Картинка — та же, что у окон и кнопок, только
+    /// залитая цветом подложки: у родного `InnerPanelBackground` уголки
+    /// скруглены на один пиксель, и рядом с кнопками строки выглядели
+    /// вырубленными по линейке.
     fn row_bg(&mut self, r: Rect) {
         self.painter.nine_slice(
-            icons::INNER_PANEL,
+            icons::PANEL,
             r.x,
             r.y,
             r.w,
             r.h,
-            icons::INNER_INSET,
-            colors::PLAIN,
+            icons::PANEL_INSET,
+            colors::ROW,
         );
     }
 
@@ -246,7 +249,9 @@ impl<'a, 'b> Layout<'a, 'b> {
         };
         self.painter.icon(item, r.x, r.y, r.w, r.h, icon);
         if mark == Mark::Deny {
-            let size = (r.w * CROSS_SIZE).round();
+            // Крестик кладём ровно так же, как игра в меню дублирования:
+            // по центру ячейки и в натуральную величину картинки.
+            let size = (r.w * super::CROSS_TEXTURE_SIZE / super::SLOT_TEXTURE_SIZE).round();
             self.painter.stretch(
                 icons::CROSS,
                 (r.x + (r.w - size) * 0.5).round(),
@@ -848,12 +853,13 @@ fn filter_window(
     }
 }
 
-/// Строка поиска, устроенная как в бестиарии и меню дублирования: слева
-/// отдельная кнопка со значком, справа от неё поле. Обе берут наведение и
-/// фокус золотой рамкой — это готовые картинки игры, `Button_Search_Border`
-/// и `Button_Wide_Border`. Сам ввод разбирает игра, см. `input::edit_text`.
+/// Строка поиска, собранная как у игры (`UIWrappedSearchBar`): слева кнопка
+/// со значком, через три пикселя — панель поля во всю оставшуюся ширину.
+/// Наведение и фокус берутся золотой рамкой — это готовые картинки игры,
+/// `Button_Search_Border` и `Button_Wide_Border`. Сам ввод разбирает игра,
+/// см. `input::edit_text`.
 fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
-    let gap = (GAP * 0.5 * scale).round();
+    let gap = (SEARCH_GAP * scale).round();
     let button = Rect {
         x: r.x,
         y: r.y,
@@ -868,15 +874,16 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
     };
 
     // --- кнопка со значком -------------------------------------------------
-    layout.row_bg(button);
+    // Своей подложки под неё не кладём: `Button_Search` — это уже готовая
+    // кнопка вместе с тёмным скруглённым фоном, и вторая коробка под ней
+    // выглядела значком, забытым в ячейке.
     let pad = (PAD * 0.4 * scale).round();
-    let icon = (button.h - pad * 2.0).round();
     layout.painter.stretch(
         icons::SEARCH,
-        button.x + pad,
-        button.y + pad,
-        icon,
-        icon,
+        button.x,
+        button.y,
+        button.w,
+        button.h,
         colors::PLAIN,
     );
     let over_button = layout.hovered(button);
@@ -888,7 +895,27 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
     }
 
     // --- само поле ---------------------------------------------------------
-    layout.row_bg(field);
+    // Заливка и обводка одного цвета — так игра рисует `_searchBoxPanel`:
+    // `BackgroundColor = BorderColor = new Color(35, 40, 83)`.
+    let icon = (field.h - pad * 2.0).round();
+    layout.painter.nine_slice(
+        icons::PANEL,
+        field.x,
+        field.y,
+        field.w,
+        field.h,
+        icons::PANEL_INSET,
+        colors::SEARCH_FIELD,
+    );
+    layout.painter.nine_slice(
+        icons::PANEL_BORDER,
+        field.x,
+        field.y,
+        field.w,
+        field.h,
+        icons::PANEL_INSET,
+        colors::SEARCH_FIELD,
+    );
     if layout.input.clicked && layout.hovered(field) {
         ui.search_focus = true;
     }
