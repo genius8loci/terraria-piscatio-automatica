@@ -5,6 +5,7 @@
 //! где `DllMain` может не вызываться.
 
 mod app;
+mod chat;
 mod clr;
 mod config;
 mod crash;
@@ -12,6 +13,7 @@ mod detour;
 mod fishing;
 mod game;
 mod input;
+pub mod lang;
 pub mod logging;
 mod overlay;
 

@@ -90,6 +90,14 @@ pub struct Game {
     /// Необязателен: не нашёлся — просто не будет проверки удочки в руке,
     /// всё остальное работает.
     m_held_item: Option<Method>,
+    /// `Language.ActiveCulture` и `GameCulture.LegacyId` — по ним выбирается
+    /// язык панели. Тоже необязательны: не нашлись — останется язык
+    /// по умолчанию.
+    m_active_culture: Option<Method>,
+    f_legacy_id: Option<Field>,
+    /// `Item.questItem` и `Lang.GetNPCNameValue` — под подписи в чате.
+    it_quest_item: Option<Field>,
+    m_npc_name: Option<Method>,
 
     m_object_get_type: Method,
 
@@ -161,6 +169,19 @@ impl Game {
             pl_buff_type: player.field("buffType")?,
             pl_add_buff: player.method("AddBuff")?,
             m_held_item: player.method("get_HeldItem").ok(),
+            m_active_culture: assembly
+                .get_type("Terraria.Localization.Language")
+                .ok()
+                .and_then(|t| t.method("get_ActiveCulture").ok()),
+            f_legacy_id: assembly
+                .get_type("Terraria.Localization.GameCulture")
+                .ok()
+                .and_then(|t| t.field("LegacyId").ok()),
+            it_quest_item: item.field("questItem").ok(),
+            m_npc_name: assembly
+                .get_type("Terraria.Lang")
+                .ok()
+                .and_then(|t| t.method("GetNPCNameValue").ok()),
 
             m_object_get_type: object_type.method("GetType")?,
 
@@ -290,14 +311,32 @@ impl Game {
     /// и дальше перенастраиваем: `netDefaults` — единственная неперегруженная
     /// настройка по id, `SetDefaults` на `GetMethod(String)` бросает
     /// `AmbiguousMatchException`.
-    pub fn item_name(&mut self, id: i32) -> Option<String> {
+    /// Заодно и признак квестовой рыбы: `Item.questItem`. Читается с того же
+    /// экземпляра, что и имя, поэтому лишней настройки предмета не выходит.
+    pub fn item_facts(&mut self, id: i32) -> Option<(String, bool)> {
         let (net_defaults, affix) = (self.m_net_defaults.as_ref()?, self.m_affix_name.as_ref()?);
         if self.scratch_item.is_none() {
             self.scratch_item = Some(self.spare_item()?);
         }
         let item = self.scratch_item.as_ref()?;
         net_defaults.invoke(item, &[Var::int(id)]).ok()?;
-        affix.invoke(item, &[]).ok()?.as_string()
+        let name = affix.invoke(item, &[]).ok()?.as_string()?;
+        let quest = self
+            .it_quest_item
+            .as_ref()
+            .and_then(|f| f.get(item).ok())
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        Some((name, quest))
+    }
+
+    /// Имя противника по его id — им подписываются спавны в чате.
+    pub fn npc_name(&self, net_id: i32) -> Option<String> {
+        self.m_npc_name
+            .as_ref()?
+            .invoke(&Var::null(), &[Var::int(net_id)])
+            .ok()?
+            .as_string()
     }
 
     /// Свободный экземпляр `Item`: берём копию первой ячейки инвентаря.
@@ -432,6 +471,20 @@ impl Game {
         }
         let power = self.it_fishing_pole.get(&held)?.as_int().unwrap_or(0);
         Ok(power > 0)
+    }
+
+    /// Язык игры — `GameCulture.LegacyId`. У русского он шестой,
+    /// см. `GameCulture.CultureName`.
+    pub fn culture_id(&self) -> Option<i32> {
+        let culture = self
+            .m_active_culture
+            .as_ref()?
+            .invoke(&Var::null(), &[])
+            .ok()?;
+        if culture.is_null() {
+            return None;
+        }
+        self.f_legacy_id.as_ref()?.get(&culture).ok()?.as_int()
     }
 
     pub fn version(&self) -> Option<String> {

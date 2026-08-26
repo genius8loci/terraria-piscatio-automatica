@@ -63,6 +63,35 @@ pub struct Config {
     pub hotkey_ui: u16,
     pub hotkey_toggle: u16,
     pub hotkey_unload: u16,
+
+    /// Писать ли в чат о том, что автомат делает. Сообщения видит только
+    /// сам игрок: они не уходят на сервер.
+    pub chat_messages: bool,
+    /// Цвета ярлыков в чате, RGB шестнадцатеричными — как в тегах игры
+    /// `[c/RRGGBB:текст]`. Решётка и регистр не важны.
+    pub chat_color_blacklist: String,
+    pub chat_color_whitelist: String,
+    pub chat_color_quest: String,
+    pub chat_color_spawn: String,
+    pub chat_color_potion: String,
+}
+
+/// Приводит цвет из конфига к шести шестнадцатеричным цифрам, как ждёт
+/// тег игры. Мусор в конфиге не должен ломать сообщение, поэтому на всё
+/// непонятное отвечаем белым.
+pub fn chat_color(value: &str) -> String {
+    let clean: String = value
+        .trim()
+        .trim_start_matches('#')
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(6)
+        .collect();
+    if clean.len() == 6 {
+        clean.to_ascii_uppercase()
+    } else {
+        "FFFFFF".to_string()
+    }
 }
 
 impl Default for Config {
@@ -82,6 +111,15 @@ impl Default for Config {
             hotkey_ui: 0x26,     // VK_UP
             hotkey_toggle: 0x28, // VK_DOWN
             hotkey_unload: 0x2E, // VK_DELETE
+            chat_messages: true,
+            // Чёрный список — почти чёрным: совсем чёрный на тёмном фоне
+            // чата не читается.
+            chat_color_blacklist: "2A2A2A".to_string(),
+            chat_color_whitelist: "FFFFFF".to_string(),
+            // Золотистый — тот же, которым игра подписывает квестовую рыбу.
+            chat_color_quest: "FFD700".to_string(),
+            chat_color_spawn: "FF4040".to_string(),
+            chat_color_potion: "D2A0FF".to_string(),
         }
     }
 }

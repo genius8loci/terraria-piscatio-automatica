@@ -229,8 +229,9 @@ pub fn load(path: &Path, wanted: &[char]) -> Option<GameFont> {
     build(&body, wanted)
 }
 
-/// Снимает заголовок XNB и распаковывает LZX-поток.
-fn decompress(raw: &[u8]) -> Option<Vec<u8>> {
+/// Снимает заголовок XNB и распаковывает LZX-поток. Наружу открыта ради
+/// смотрелки ассетов: ей нужны и звуки, а разбирает она их сама.
+pub fn decompress(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() < 14 || &raw[0..3] != b"XNB" {
         return None;
     }

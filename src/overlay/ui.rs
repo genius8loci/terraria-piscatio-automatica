@@ -10,6 +10,7 @@
 
 use super::state::{self, Mark};
 use super::{Painter, colors, icons};
+use crate::lang;
 
 // Заголовок панели собирается из `Cargo.toml`, чтобы не разъезжаться
 // со свойствами самой DLL: там те же `description`, `version` и `authors`.
@@ -28,19 +29,6 @@ const TITLE: &str = concat!(
 
 /// Насколько панель плотнее родного интерфейса игры.
 const DENSITY: f32 = 0.9;
-
-/// Подписи строк — по самой длинной из них считается ширина панели.
-/// У авторыбалки берётся с самым длинным припиской, иначе координаты
-/// заброса налезали бы на звёздочку.
-const LABELS: &[&str] = &[
-    "Авторыбалка (зафиксировано 1920:1080)",
-    "Сундуки разложить при заполнении",
-    "Подсекать врагов (Герцог Рыброн)",
-    "Поплавок",
-    "Свободные ячейки",
-    "Автопитьё зелий",
-    "Зелья для автоиспользования:",
-];
 
 /// Базовые размеры при масштабе 1.0; всё остальное — умножением.
 const ROW_H: f32 = 34.0;
@@ -86,13 +74,12 @@ const LIST: Knob = Knob {
     w: 22.0,
     h: 22.0,
 };
-/// Самая широкая картинка переключателя — по ней считается место,
-/// которое надо оставить справа от подписи.
-const KNOB_MAX: f32 = CHEST.w;
+/// Насколько кнопка-переключатель выше строки — с каждой стороны.
+/// Столько же уходит в просвет между строкой и кнопкой.
+const KNOB_OVER: f32 = 2.0;
 /// Сторона уголка на кнопке сворачивания.
 const CHEVRON: f32 = 16.0;
 /// Подсказка в пустой строке поиска — как у игры в её собственных полях.
-const SEARCH_HINT: &str = "Имя:";
 /// Просвет между кнопкой поиска и полем: у игры ровно три пикселя.
 const SEARCH_GAP: f32 = 3.0;
 /// Высота строки поиска. У игры `UIWrappedSearchBar.Height = 24`, и она
@@ -162,13 +149,16 @@ pub struct Input {
 /// поэтому это код, а не строка; сам текст — в `hint_text`.
 pub const HINT_NONE: u8 = 0;
 pub const HINT_NO_POTION: u8 = 1;
+pub const HINT_LIST_BLACK: u8 = 2;
+pub const HINT_LIST_WHITE: u8 = 3;
 
 /// Текст подсказки по её коду.
 pub fn hint_text(hint: u8) -> Option<&'static str> {
+    let t = lang::t();
     match hint {
-        HINT_NO_POTION => Some(
-            "Этого зелья нет в инвентаре.\nПоложите его в инвентарь, чтобы включить автопитьё.",
-        ),
+        HINT_NO_POTION => Some(t.hint_no_potion),
+        HINT_LIST_BLACK => Some(t.hint_list_black),
+        HINT_LIST_WHITE => Some(t.hint_list_white),
         _ => None,
     }
 }
@@ -329,24 +319,40 @@ impl<'a, 'b> Layout<'a, 'b> {
         }
     }
 
+    /// Насколько кнопка-переключатель выступает за строку сверху и снизу.
+    /// Столько же уходит в просвет между ними, чтобы кнопка читалась
+    /// продолжением строки, а не наклейкой поверх.
+    fn knob_over(&self) -> f32 {
+        (KNOB_OVER * self.scale).round().max(1.0)
+    }
+
+    /// Сторона кнопки-переключателя при такой высоте строки.
+    fn knob_side(&self, row_h: f32) -> f32 {
+        row_h + self.knob_over() * 2.0
+    }
+
     /// Переключатель: две картинки игры, подсвеченная и обычная. Цвет
     /// у обеих свой, поэтому красим их белым; наведение показываем
     /// золотой рамкой, как игра.
-    fn toggle(&mut self, r: Rect, knob: Knob, on: bool) -> bool {
-        let clicked = self.hit(r);
+    ///
+    /// Место под кнопку квадратное, а картинка в него вписывается со своими
+    /// пропорциями: у сундука 32x30, у звёздочки и катушки квадрат.
+    fn toggle(&mut self, place: Rect, knob: Knob, on: bool) -> bool {
+        let clicked = self.hit(place);
         let id = if on { knob.on } else { knob.off };
-        self.painter.stretch(id, r.x, r.y, r.w, r.h, colors::PLAIN);
-        if self.hovered(r) {
-            let pad = (2.0 * self.scale).round();
-            self.frame(
-                Rect {
-                    x: r.x - pad,
-                    y: r.y - pad,
-                    w: r.w + pad * 2.0,
-                    h: r.h + pad * 2.0,
-                },
-                icons::FRAME_SMALL,
-            );
+        let fit = (place.w / knob.w).min(place.h / knob.h);
+        let w = (knob.w * fit).round();
+        let h = (knob.h * fit).round();
+        self.painter.stretch(
+            id,
+            (place.x + (place.w - w) * 0.5).round(),
+            (place.y + (place.h - h) * 0.5).round(),
+            w,
+            h,
+            colors::PLAIN,
+        );
+        if self.hovered(place) {
+            self.frame(place, icons::FRAME_SMALL);
         }
         clicked
     }
@@ -371,21 +377,31 @@ impl<'a, 'b> Layout<'a, 'b> {
         knob: Knob,
         on: bool,
     ) -> bool {
-        self.row_bg(r);
+        // Подложка строки не доходит до правого края: там стоит кнопка,
+        // и между ними просвет. Кнопка выше строки на пару пикселей с каждой
+        // стороны — так она читается переключателем, а не частью подписи.
+        let over = self.knob_over();
+        let side = self.knob_side(r.h);
+        let bar = Rect {
+            x: r.x,
+            y: r.y,
+            w: (r.w - side - over * 2.0).max(r.h),
+            h: r.h,
+        };
+        self.row_bg(bar);
         let pad = (PAD * self.scale).round();
         self.painter
-            .text_left(r.x + pad, r.y, r.h, label, colors::TEXT);
+            .text_left(bar.x + pad, bar.y, bar.h, label, colors::TEXT);
         if !note.is_empty() {
-            let after = r.x + pad + self.painter.measure(label);
-            self.painter.text_left(after, r.y, r.h, note, note_color);
+            let after = bar.x + pad + self.painter.measure(label);
+            self.painter
+                .text_left(after, bar.y, bar.h, note, note_color);
         }
-        let w = (knob.w * self.scale).round();
-        let h = (knob.h * self.scale).round();
         let place = Rect {
-            x: r.x + r.w - w - pad,
-            y: (r.y + (r.h - h) * 0.5).round(),
-            w,
-            h,
+            x: r.x + r.w - side,
+            y: r.y - over,
+            w: side,
+            h: side,
         };
         self.toggle(place, knob, on)
     }
@@ -474,10 +490,20 @@ pub fn build(
     // `Cargo.toml`, чей размер заранее неизвестен. Шире экрана при этом
     // панель не становится.
     let pad2 = (PAD * 2.0 * scale).round();
-    let toggle_gap = (KNOB_MAX + PAD) * scale;
-    let longest = LABELS
+    // Справа от подписи должно остаться место под кнопку и просвет перед ней:
+    // кнопка ровно на `KNOB_OVER` выше строки с каждой стороны.
+    let toggle_gap = (ROW_H + KNOB_OVER * 4.0 + PAD) * scale;
+    let t = lang::t();
+    // Подпись авторыбалки меряем с самым длинным припиской: иначе координаты
+    // заброса налезали бы на кнопку переключателя.
+    let aim_sample = lang::fill(t.note_aim, &["1920", "1080"]);
+    let longest = t
+        .row_labels()
         .iter()
         .map(|label| layout.painter.measure(label) + toggle_gap)
+        .chain(std::iter::once(
+            layout.painter.measure(t.auto_fish) + layout.painter.measure(&aim_sample) + toggle_gap,
+        ))
         .fold(layout.painter.measure(TITLE), f32::max);
     let panel_w = (longest + pad2)
         .max(PANEL_MIN_W * scale)
@@ -605,14 +631,14 @@ pub fn build(
     let (note, note_color) = match (auto_fish, aim, recast) {
         (false, _, _) => (String::new(), colors::TEXT),
         // Включились при уже заброшенном поплавке: по нему точку не взять.
-        (true, _, true) => (" (забросьте удочку заново)".to_string(), colors::RARE_GREEN),
-        (true, None, _) => (
-            " (жду первого броска удочки)".to_string(),
-            colors::RARE_GREEN,
+        (true, _, true) => (t.note_recast.to_string(), colors::RARE_GREEN),
+        (true, None, _) => (t.note_wait_cast.to_string(), colors::RARE_GREEN),
+        (true, Some((ax, ay)), _) => (
+            lang::fill(t.note_aim, &[&ax.to_string(), &ay.to_string()]),
+            colors::RARE_ORANGE,
         ),
-        (true, Some((ax, ay)), _) => (format!(" (зафиксировано {ax}:{ay})"), colors::RARE_ORANGE),
     };
-    if layout.switch_row_note(r, "Авторыбалка", &note, note_color, STAR, auto_fish) {
+    if layout.switch_row_note(r, t.auto_fish, &note, note_color, STAR, auto_fish) {
         state::with(|s| {
             s.auto_fish = !s.auto_fish;
             s.dirty = true;
@@ -620,8 +646,7 @@ pub fn build(
     }
 
     let r = next_row(&mut cursor);
-    if layout.switch_row_knob(r, "Сундуки разложить при заполнении", CHEST, quick_stack)
-    {
+    if layout.switch_row_knob(r, t.quick_stack, CHEST, quick_stack) {
         state::with(|s| {
             s.quick_stack = !s.quick_stack;
             s.dirty = true;
@@ -629,8 +654,7 @@ pub fn build(
     }
 
     let r = next_row(&mut cursor);
-    if layout.switch_row(r, "Подсекать врагов (Герцог Рыброн)", enemies)
-    {
+    if layout.switch_row(r, t.pull_enemies, enemies) {
         state::with(|s| {
             s.pull_enemy_spawns = !s.pull_enemy_spawns;
             s.dirty = true;
@@ -643,8 +667,8 @@ pub fn build(
     layout.row_bg(r);
     layout
         .painter
-        .text_left(r.x + pad, r.y, r.h, "Поплавок", colors::TEXT);
-    let label = if cast { "Заброшен" } else { "Нет" };
+        .text_left(r.x + pad, r.y, r.h, t.bobber, colors::TEXT);
+    let label = if cast { t.bobber_cast } else { t.bobber_none };
     let label_w = layout.painter.measure(label);
     let size = (TOGGLE * scale).round();
     layout.painter.stretch(
@@ -675,11 +699,11 @@ pub fn build(
     } else {
         free.to_string()
     };
-    layout.value_row(r, "Свободные ячейки", &value, colors::VALUE);
+    layout.value_row(r, t.free_slots, &value, colors::VALUE);
 
     // --- автопитьё ---------------------------------------------------------
     let r = next_row(&mut cursor);
-    if layout.switch_row(r, "Автопитьё зелий", auto_potions) {
+    if layout.switch_row(r, t.auto_potions, auto_potions) {
         state::with(|s| {
             s.auto_potions = !s.auto_potions;
             s.dirty = true;
@@ -687,13 +711,9 @@ pub fn build(
     }
 
     // --- ячейки зелий ------------------------------------------------------
-    layout.painter.text_left(
-        inner_x,
-        cursor,
-        slot,
-        "Зелья для автоиспользования:",
-        colors::TEXT,
-    );
+    layout
+        .painter
+        .text_left(inner_x, cursor, slot, t.potions_shelf, colors::TEXT);
     let mut slot_x = inner_x + inner_w - slot * 3.0 - GAP * 2.0 * scale;
     for (index, (item, _, _)) in crate::game::POTIONS.iter().enumerate() {
         let cell = Rect {
@@ -756,14 +776,14 @@ pub fn build(
         w: tab_w,
         h: row_h,
     };
-    if layout.button(filter_tab, "Фильтр", ui.tab == Tab::Filter) {
+    if layout.button(filter_tab, t.tab_filter, ui.tab == Tab::Filter) {
         ui.tab = if ui.tab == Tab::Filter {
             Tab::None
         } else {
             Tab::Filter
         };
     }
-    if layout.button(stats_tab, "Статистика", ui.tab == Tab::Stats) {
+    if layout.button(stats_tab, t.tab_stats, ui.tab == Tab::Stats) {
         ui.tab = if ui.tab == Tab::Stats {
             Tab::None
         } else {
@@ -832,10 +852,8 @@ fn filter_window(
         s.fishable
             .iter()
             .filter(|id| {
-                s.names
-                    .iter()
-                    .find(|(name_id, _)| name_id == *id)
-                    .is_some_and(|(_, name)| name.contains(&query))
+                s.facts(**id)
+                    .is_some_and(|facts| facts.search.contains(&query))
             })
             .copied()
             .collect()
@@ -852,8 +870,8 @@ fn filter_window(
     let margin = (SCREEN_MARGIN * scale).round();
 
     // Сколько строк вообще можно показать, чтобы окно влезло в экран.
-    // Шапка: заголовок, строка режима и строка поиска — последняя ниже.
-    let head_h = pad + row_h * 2.0 + search_h + gap * 2.0;
+    // Шапка: заголовок с переключателем режима и строка поиска под ним.
+    let head_h = pad + row_h + search_h + gap * 2.0;
     let available = (screen_h - y - margin - head_h - pad).max(cell);
     let fits = ((available + gap) / (cell + gap)).floor().max(1.0) as usize;
 
@@ -894,26 +912,35 @@ fn filter_window(
     let inner_x = panel.x + pad;
     let inner_w = panel.w - pad * 2.0;
     let mut cursor = panel.y + pad;
+
+    // Шапка: заголовок по центру и сразу за ним катушка — переключатель
+    // режима списка. Отдельной строки под режим нет: что он значит,
+    // рассказывает подсказка под курсором, как у ячеек зелий.
+    let whitelist = state::with(|s| s.whitelist_mode).unwrap_or(false);
+    let title = lang::t().tab_filter;
+    let title_w = layout.painter.measure(title);
+    let side = layout.knob_side(row_h);
+    let head_gap = (GAP * scale).round();
+    let head_x = (inner_x + (inner_w - title_w - head_gap - side) * 0.5)
+        .floor()
+        .max(inner_x);
     layout
         .painter
-        .text_left(inner_x, cursor, row_h, "Фильтр", colors::TITLE);
-    cursor += row_h;
-
-    // Режим списка: белый — берём только отмеченное, чёрный — всё кроме.
-    let whitelist = state::with(|s| s.whitelist_mode).unwrap_or(false);
-    let r = Rect {
-        x: inner_x,
-        y: cursor,
-        w: inner_w,
-        h: row_h,
+        .text_left(head_x, cursor, row_h, title, colors::TITLE);
+    let knob = Rect {
+        x: head_x + title_w + head_gap,
+        y: (cursor + (row_h - side) * 0.5).round(),
+        w: side,
+        h: side,
     };
-    // Подписи короткие: катушка шире звёздочки, и прежние наезжали на неё.
-    let label = if whitelist {
-        "Белый список: беру только зелёное"
-    } else {
-        "Чёрный список: беру всё, кроме красного"
-    };
-    if layout.switch_row_knob(r, label, LIST, whitelist) {
+    if layout.hovered(knob) {
+        layout.hint = if whitelist {
+            HINT_LIST_WHITE
+        } else {
+            HINT_LIST_BLACK
+        };
+    }
+    if layout.toggle(knob, LIST, whitelist) {
         state::with(|s| {
             s.whitelist_mode = !s.whitelist_mode;
             s.dirty = true;
@@ -1103,8 +1130,8 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, ui_scale: f32) {
     if ui.search.is_empty() {
         layout
             .painter
-            .text_left(pen, field.y, field.h, SEARCH_HINT, colors::HINT);
-        pen += layout.painter.measure(SEARCH_HINT);
+            .text_left(pen, field.y, field.h, lang::t().search_hint, colors::HINT);
+        pen += layout.painter.measure(lang::t().search_hint);
     } else {
         // Длинную строку показываем хвостом: набирают-то в конце.
         let mut shown = ui.search.as_str();
@@ -1201,24 +1228,27 @@ fn scrollbar(
 }
 
 fn stats_window(layout: &mut Layout, x: f32, y: f32, w: f32, scale: f32) {
-    let rows: Vec<(String, String)> = state::with(|s| {
-        let t = s.stats.seconds;
+    let t = lang::t();
+    let rows: Vec<(&str, String)> = state::with(|s| {
+        let secs = s.stats.seconds;
         vec![
             (
-                "Время рыбалки".to_string(),
-                format!("{:02}:{:02}:{:02}", t / 3600, (t % 3600) / 60, t % 60),
+                t.stat_time,
+                format!(
+                    "{:02}:{:02}:{:02}",
+                    secs / 3600,
+                    (secs % 3600) / 60,
+                    secs % 60
+                ),
             ),
-            ("Поймано предметов".to_string(), s.stats.caught.to_string()),
-            ("Поймано ящиков".to_string(), s.stats.crates.to_string()),
+            (t.stat_caught, s.stats.caught.to_string()),
+            (t.stat_crates, s.stats.crates.to_string()),
+            (t.stat_skipped, s.stats.skipped.to_string()),
             (
-                "Пропущено по фильтру".to_string(),
-                s.stats.skipped.to_string(),
+                t.stat_bite,
+                lang::fill(t.stat_seconds, &[&format!("{:.1}", s.stats.average_bite)]),
             ),
-            (
-                "Среднее время поклёвки".to_string(),
-                format!("{:.1} сек.", s.stats.average_bite),
-            ),
-            ("Зелья выпито".to_string(), s.stats.potions.to_string()),
+            (t.stat_potions, s.stats.potions.to_string()),
         ]
     })
     .unwrap_or_default();
@@ -1239,7 +1269,7 @@ fn stats_window(layout: &mut Layout, x: f32, y: f32, w: f32, scale: f32) {
     let mut cursor = panel.y + pad;
     layout
         .painter
-        .text(inner_x, cursor, "Статистика", colors::TITLE);
+        .text(inner_x, cursor, t.tab_stats, colors::TITLE);
     cursor += row_h;
 
     for (label, value) in rows {
@@ -1249,7 +1279,7 @@ fn stats_window(layout: &mut Layout, x: f32, y: f32, w: f32, scale: f32) {
             w: inner_w,
             h: row_h,
         };
-        layout.value_row(r, &label, &value, colors::VALUE);
+        layout.value_row(r, label, &value, colors::VALUE);
         cursor += row_h + row_gap;
     }
 }

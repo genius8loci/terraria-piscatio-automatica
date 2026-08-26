@@ -10,6 +10,7 @@
 
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 
 use windows::core::IUnknown;
@@ -28,6 +29,12 @@ pub static COMMAND: AtomicU8 = AtomicU8::new(CMD_NONE);
 /// Заявка «разложить по ближайшим сундукам». Отдельно от `COMMAND`:
 /// раскладка не занимает кадров и с нажатием не конфликтует.
 static QUICK_STACK: AtomicBool = AtomicBool::new(false);
+/// Строки, которые ждут отправки в чат, и признак «есть что отправлять».
+/// Признак отдельно, чтобы в простое не брать мьютекс каждый кадр.
+static CHAT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static CHAT_PENDING: AtomicBool = AtomicBool::new(false);
+/// Сколько строк держим, если игровой поток почему-то их не разбирает.
+const CHAT_LIMIT: usize = 32;
 /// Экранные координаты прицела; -1 — не трогать курсор.
 pub static AIM_X: AtomicI32 = AtomicI32::new(-1);
 pub static AIM_Y: AtomicI32 = AtomicI32::new(-1);
@@ -64,6 +71,14 @@ struct Handles {
     /// `Player.QuickStackAllChests()` — та самая кнопка из инвентаря.
     /// Не нашлась — просто не будет раскладки.
     quick_stack: Option<Method>,
+    /// Строка в чат: `Main.chatMonitor` и `IChatMonitor.NewText`.
+    ///
+    /// Не `Main.NewText`: у неё две перегрузки, и `Type.GetMethod(String)`
+    /// на таком имени бросает `AmbiguousMatchException`. У интерфейса имя
+    /// одно. Заодно и тише: `Main.NewText` ещё и звук щелчка играет.
+    /// Сообщение никуда не уходит — его видит только сам игрок.
+    chat_monitor: Option<Field>,
+    new_text: Option<Method>,
     /// Всё, что нужно для подсказки предмета. Целиком необязательно:
     /// не нашлось — просто не будет подсказок.
     tooltip: Option<TooltipApi>,
@@ -140,7 +155,8 @@ pub fn on_item_check(_this: *mut c_void) {
 
     let command = COMMAND.load(Ordering::Acquire);
     let stack = QUICK_STACK.load(Ordering::Acquire);
-    if command == CMD_NONE && !stack {
+    let chat = CHAT_PENDING.load(Ordering::Acquire);
+    if command == CMD_NONE && !stack && !chat {
         // Быстрый путь: в простое ни одного обращения к CLR.
         return;
     }
@@ -158,6 +174,10 @@ pub fn on_item_check(_this: *mut c_void) {
         FAILURES.fetch_add(1, Ordering::Relaxed);
         COMMAND.store(CMD_NONE, Ordering::Release);
         QUICK_STACK.store(false, Ordering::Release);
+        CHAT_PENDING.store(false, Ordering::Release);
+        if let Ok(mut queue) = CHAT.lock() {
+            queue.clear();
+        }
         crate::log!("ввод: поднять хэндлы не удалось, команда отменена");
         return;
     };
@@ -165,6 +185,10 @@ pub fn on_item_check(_this: *mut c_void) {
     if stack {
         QUICK_STACK.store(false, Ordering::Release);
         quick_stack(handles);
+    }
+
+    if chat {
+        flush_chat(handles);
     }
 
     match command {
@@ -273,6 +297,11 @@ fn attach() -> Option<Handles> {
         control_use_item: player.field("controlUseItem").ok()?,
         mouse_interface: player.field("mouseInterface").ok()?,
         quick_stack: player.method("QuickStackAllChests").ok(),
+        chat_monitor: main.field("chatMonitor").ok(),
+        new_text: assembly
+            .get_type("Terraria.GameContent.UI.Chat.IChatMonitor")
+            .ok()
+            .and_then(|t| t.method("NewText").ok()),
         tooltip: tooltip_api(&assembly, &main),
         text: text_api(&main, input.as_ref()),
         _clr: clr,
@@ -331,6 +360,53 @@ pub fn request_quick_stack() {
 /// Заявка ещё не исполнена.
 pub fn quick_stack_pending() -> bool {
     QUICK_STACK.load(Ordering::Acquire)
+}
+
+/// Поставить строку в очередь на отправку в чат. Отправит её игровой поток
+/// в ближайшем кадре, см. `flush_chat`.
+pub fn queue_chat(line: String) {
+    let Ok(mut queue) = CHAT.lock() else {
+        return;
+    };
+    // Если разбирать очередь некому, старые строки уже неинтересны.
+    if queue.len() >= CHAT_LIMIT {
+        queue.remove(0);
+    }
+    queue.push(line);
+    CHAT_PENDING.store(true, Ordering::Release);
+}
+
+/// Отдаёт накопленные строки чату игры. Только с игрового потока: чат —
+/// её собственный список, и правит его она сама в своём кадре.
+fn flush_chat(handles: &Handles) {
+    let lines: Vec<String> = match CHAT.lock() {
+        Ok(mut queue) => std::mem::take(&mut *queue),
+        Err(_) => return,
+    };
+    CHAT_PENDING.store(false, Ordering::Release);
+    let (Some(monitor_field), Some(new_text)) =
+        (handles.chat_monitor.as_ref(), handles.new_text.as_ref())
+    else {
+        return;
+    };
+    let Ok(monitor) = monitor_field.get_static() else {
+        return;
+    };
+    if monitor.is_null() {
+        return;
+    }
+    for line in lines {
+        // Цвет задаётся тегами прямо в строке, поэтому сюда отдаём белый.
+        let _ = new_text.invoke(
+            &monitor,
+            &[
+                Var::text(&line),
+                Var::byte(255),
+                Var::byte(255),
+                Var::byte(255),
+            ],
+        );
+    }
 }
 
 /// Снять зависшую заявку: без детура исполнять её некому, а автомат

@@ -16,7 +16,7 @@ use crate::config::{Config, FilterMode};
 use crate::fishing::Fishing;
 use crate::game::Game;
 use crate::overlay::state::{self, Mark};
-use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, detour, input, log, overlay};
+use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, detour, input, lang, log, overlay};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// Чтение состояния игры заметно дороже опроса клавиш.
@@ -140,6 +140,22 @@ pub fn run(dll_dir: PathBuf) {
                             None => "подключено".to_string(),
                         };
                     });
+                    // Язык панели — язык игры: русский, если у игрока русский,
+                    // иначе английский. Спрашиваем один раз, на подключении.
+                    let culture = attached.culture_id();
+                    lang::set_russian(culture == Some(lang::RUSSIAN_ID));
+                    log!(
+                        "язык панели: {} (культура игры {})",
+                        if lang::is_russian() {
+                            "русский"
+                        } else {
+                            "английский"
+                        },
+                        match culture {
+                            Some(id) => id.to_string(),
+                            None => "неизвестна".to_string(),
+                        }
+                    );
                     apply_settings(&attached, &config);
                     let ready = install_detour(&attached);
                     state::with(|s| s.status.detour_ready = ready);
@@ -270,10 +286,26 @@ fn load_fishable(game: &mut Game) {
             // Имена нужны поиску в фильтре. Спрашиваем их один раз здесь,
             // на рабочем потоке: на потоке рендера столько вызовов в CLR
             // за кадр делать нельзя.
-            let mut names: Vec<(i32, String)> = Vec::with_capacity(items.len());
+            let mut names: Vec<state::ItemFacts> = Vec::with_capacity(items.len());
             for id in &items {
-                if let Some(name) = game.item_name(*id) {
-                    names.push((*id, name.to_lowercase()));
+                if let Some((name, quest)) = game.item_facts(*id) {
+                    names.push(state::ItemFacts {
+                        id: *id,
+                        search: name.to_lowercase(),
+                        display: name,
+                        quest,
+                    });
+                }
+            }
+            // Зелья в `FishDropsDB` не попадают, а их имена нужны чату.
+            for (item, _, _) in crate::game::POTIONS.iter() {
+                if let Some((name, quest)) = game.item_facts(*item) {
+                    names.push(state::ItemFacts {
+                        id: *item,
+                        search: name.to_lowercase(),
+                        display: name,
+                        quest,
+                    });
                 }
             }
             log!("имён предметов получено: {}", names.len());

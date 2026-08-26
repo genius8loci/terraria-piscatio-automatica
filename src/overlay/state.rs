@@ -28,6 +28,15 @@ impl Mark {
     }
 }
 
+/// Что игра рассказала про предмет: имя в двух видах и признак квестовой
+/// рыбы. Поиску нужен нижний регистр, чату — как показывает игра.
+pub struct ItemFacts {
+    pub id: i32,
+    pub search: String,
+    pub display: String,
+    pub quest: bool,
+}
+
 #[derive(Default)]
 pub struct Status {
     pub connected: String,
@@ -69,9 +78,9 @@ pub struct Shared {
     pub filter: HashMap<i32, Mark>,
     /// Что вообще ловится — берётся из `Main.FishDropsDB`.
     pub fishable: Vec<i32>,
-    /// Имена этих предметов в нижнем регистре — под поиск в фильтре.
-    /// Спрашиваются у игры один раз, на рабочем потоке.
-    pub names: Vec<(i32, String)>,
+    /// Что игра знает про эти предметы. Спрашивается один раз при
+    /// подключении, на рабочем потоке.
+    pub names: Vec<ItemFacts>,
     pub status: Status,
     pub stats: Stats,
     /// UI что-то переключил — рабочему потоку надо сохранить конфиг.
@@ -98,6 +107,11 @@ impl Default for Shared {
 }
 
 impl Shared {
+    /// Что известно про предмет. `None` — игра о нём не рассказывала.
+    pub fn facts(&self, item: i32) -> Option<&ItemFacts> {
+        self.names.iter().find(|f| f.id == item)
+    }
+
     /// Решение по улову с учётом режима списка и отметки предмета.
     pub fn should_pull(&self, item: i32) -> bool {
         // Отрицательное значение — не предмет, а вражеский спавн: игра кладёт

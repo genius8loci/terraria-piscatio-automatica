@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::chat;
 use crate::config::Config;
 use crate::detour;
 use crate::game::{Game, POTIONS};
@@ -214,7 +215,7 @@ impl Fishing {
         }
         if self.last_potion.elapsed() >= POTION_INTERVAL {
             self.last_potion = Instant::now();
-            self.drink_potions(game);
+            self.drink_potions(game, config);
         }
 
         match game.find_bobber(self.hint) {
@@ -334,7 +335,7 @@ impl Fishing {
     }
 
     /// Автопитьё: доливаем только те бафы, что выбраны в панели и погасли.
-    fn drink_potions(&mut self, game: &Game) {
+    fn drink_potions(&mut self, game: &Game, config: &Config) {
         let (enabled, selected) =
             state::with(|s| (s.auto_potions, s.potions)).unwrap_or((false, [false; 3]));
         if !enabled {
@@ -357,6 +358,8 @@ impl Fishing {
                 Ok(()) => {
                     log!("выпито зелье {name}");
                     state::with(|s| s.stats.potions += 1);
+                    let shown = Self::display_name(*item);
+                    chat::potion_used(config, *item, &shown);
                 }
                 Err(e) => log!("зелье {name} выпить не вышло: {e}"),
             }
@@ -380,6 +383,7 @@ impl Fishing {
         if !take {
             self.skips += 1;
             log!("пропуск: улов {rolled} не проходит фильтр, наживка не тратится");
+            self.announce(game, config, rolled, false);
             return;
         }
         if !self.enabled() {
@@ -399,8 +403,44 @@ impl Fishing {
             self.crates += 1;
         }
         log!("подсечка #{}: улов {rolled}", self.pulls);
+        self.announce(game, config, rolled, true);
         let pause = self.jitter(config, AFTER_PULL);
         self.next_action = Instant::now() + pause;
+    }
+
+    /// Рассказывает игроку в чат, что случилось с этой поклёвкой.
+    ///
+    /// Отрицательный `rolled` — не предмет, а вражеский спавн: игра кладёт
+    /// в `localAI[1]` минус id NPC. Про обычный улов пишем только когда он
+    /// пропущен или это квестовая рыба: остальное игрок и так видит.
+    fn announce(&self, game: &Game, config: &Config, rolled: i32, hooked: bool) {
+        if rolled < 0 {
+            let name = game
+                .npc_name(-rolled)
+                .unwrap_or_else(|| format!("#{}", -rolled));
+            chat::spawn(config, &name, hooked);
+            return;
+        }
+        let (name, quest) = state::with(|s| {
+            s.facts(rolled)
+                .map(|f| (f.display.clone(), f.quest))
+                .unwrap_or_else(|| (format!("#{rolled}"), false))
+        })
+        .unwrap_or_else(|| (format!("#{rolled}"), false));
+        if !hooked {
+            let whitelist = state::with(|s| s.whitelist_mode).unwrap_or(false);
+            chat::item_skipped(config, rolled, &name, whitelist);
+        } else if quest {
+            chat::quest_caught(config, rolled, &name);
+        }
+    }
+
+    /// Имя предмета так, как его показывает игра. Спрошено один раз при
+    /// подключении; для чего имени нет — покажем хотя бы id.
+    fn display_name(item: i32) -> String {
+        state::with(|s| s.facts(item).map(|f| f.display.clone()))
+            .flatten()
+            .unwrap_or_else(|| format!("#{item}"))
     }
 
     fn on_idle(&mut self, game: &Game, config: &Config) {
