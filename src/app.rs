@@ -75,6 +75,9 @@ pub fn run(dll_dir: PathBuf) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
+    // Ловушке падений нужно знать, какой поток тут рабочий: иначе по строке
+    // падения не понять, кто именно упал.
+    crash::mark_worker_thread();
 
     // Первой строкой — кто именно запустился. В логе накапливаются сессии
     // разных сборок, и без версии непонятно, к какой относится запись.
@@ -298,6 +301,7 @@ fn pull_config(config: &mut Config) {
 
 /// Список ловимого берём у игры и отдаём оверлею под атлас иконок.
 fn load_fishable(game: &mut Game) {
+    let _step = crash::Step::worker(crash::STEP_NAMES);
     match game.fishable_items() {
         Ok(items) => {
             log!("ловится предметов: {}", items.len());

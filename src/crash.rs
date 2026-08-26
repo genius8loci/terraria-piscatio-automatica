@@ -19,11 +19,13 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, EXCEPTION_POINTERS, RemoveVectoredExceptionHandler,
+    RtlCaptureStackBackTrace,
 };
 use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     GetModuleFileNameW, GetModuleHandleExW,
 };
+use windows::Win32::System::Threading::GetCurrentThreadId;
 
 /// Отдать исключение следующему обработчику.
 const CONTINUE_SEARCH: i32 = 0;
@@ -55,6 +57,10 @@ pub const STEP_POTIONS: u8 = 9;
 pub const STEP_ROD: u8 = 10;
 pub const STEP_LANG: u8 = 11;
 pub const STEP_SOUND: u8 = 12;
+pub const STEP_CURSOR: u8 = 13;
+pub const STEP_AIM: u8 = 14;
+pub const STEP_BITE: u8 = 15;
+pub const STEP_NAMES: u8 = 16;
 
 fn step_name(step: u8) -> &'static str {
     match step {
@@ -70,12 +76,40 @@ fn step_name(step: u8) -> &'static str {
         STEP_ROD => "удочка в руке",
         STEP_LANG => "язык игры",
         STEP_SOUND => "звук квестовой рыбы",
+        STEP_CURSOR => "курсор и масштаб для панели",
+        STEP_AIM => "точка заброса",
+        STEP_BITE => "разбор поклёвки",
+        STEP_NAMES => "список ловимого и имена",
         _ => "ничего",
     }
 }
 
 static GAME_STEP: AtomicU8 = AtomicU8::new(STEP_NONE);
 static WORKER_STEP: AtomicU8 = AtomicU8::new(STEP_NONE);
+
+/// Кто есть кто. Отметки шагов говорят, что мы делали, но не говорят,
+/// какой поток упал: без этого «ничего, ничего» читается двусмысленно.
+static GAME_THREAD: AtomicU32 = AtomicU32::new(0);
+static WORKER_THREAD: AtomicU32 = AtomicU32::new(0);
+
+pub fn mark_game_thread() {
+    GAME_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+}
+
+pub fn mark_worker_thread() {
+    WORKER_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+}
+
+/// Чей это поток, по его номеру.
+fn thread_name(id: u32) -> &'static str {
+    if id != 0 && id == GAME_THREAD.load(Ordering::Relaxed) {
+        "игровой"
+    } else if id != 0 && id == WORKER_THREAD.load(Ordering::Relaxed) {
+        "рабочий"
+    } else {
+        "чужой"
+    }
+}
 
 /// Отметка «сейчас идёт такой-то вызов», снимается сама при выходе.
 pub struct Step(&'static AtomicU8);
@@ -157,37 +191,77 @@ unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
         detail = format!(", {action} по 0x{target:08X}");
     }
 
+    let faulted = unsafe { GetCurrentThreadId() };
     crate::log!(
-        "ПАДЕНИЕ: код 0x{:08X} по адресу 0x{address:08X} в {}{detail} \
-         | игровой поток: {}, рабочий: {}",
+        "ПАДЕНИЕ: код 0x{:08X} в {}{detail} \
+         | упал поток {} (#{faulted}) \
+         | игровой занят: {}, рабочий занят: {}",
         code.0,
-        module_of(address),
+        frame_of(address),
+        thread_name(faulted),
         step_name(GAME_STEP.load(Ordering::Relaxed)),
         step_name(WORKER_STEP.load(Ordering::Relaxed))
     );
+    // Отдельной строкой: она длинная, и её удобно копировать целиком.
+    crate::log!("ПАДЕНИЕ, стек: {}", backtrace());
     CONTINUE_SEARCH
 }
 
-/// Имя модуля, которому принадлежит адрес: по нему сразу видно, наш это
-/// код, игра или драйвер.
-fn module_of(address: usize) -> String {
+/// Адрес в виде `модуль+смещение`: `piscatio.dll+0x1A2B`. По имени модуля
+/// сразу видно, чей это код — наш, игры или рантайма.
+///
+/// Смещение важнее самого адреса: адреса модулей от запуска к запуску
+/// разъезжаются, а смещение — нет. По нему кадр стека можно найти
+/// в дизассемблере и сравнить два падения между собой.
+fn frame_of(address: usize) -> String {
+    match module_base(address) {
+        Some((name, base)) => format!("{name}+0x{:X}", address.saturating_sub(base)),
+        None => format!("0x{address:08X} (JIT или куча)"),
+    }
+}
+
+/// Имя модуля и адрес его загрузки. На Windows `HMODULE` и есть база.
+fn module_base(address: usize) -> Option<(String, usize)> {
     unsafe {
         let mut module = Default::default();
-        if GetModuleHandleExW(
+        GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
             windows::core::PCWSTR(address as *const u16),
             &mut module,
         )
-        .is_err()
-        {
-            return "вне модулей (JIT или куча)".to_string();
-        }
+        .ok()?;
         let mut buffer = [0u16; 260];
         let len = GetModuleFileNameW(Some(module), &mut buffer) as usize;
         if len == 0 {
-            return "неизвестный модуль".to_string();
+            return None;
         }
         let path = String::from_utf16_lossy(&buffer[..len]);
-        path.rsplit('\\').next().unwrap_or(&path).to_string()
+        let name = path.rsplit('\\').next().unwrap_or(&path).to_string();
+        Some((name, module.0 as usize))
     }
+}
+
+/// Стек вызовов в момент падения, кадрами вида `модуль+смещение`.
+///
+/// Это и есть ответ на вопрос «что именно случилось»: отметки шагов
+/// говорят лишь, был ли наш вызов в работе, а стек показывает, кто кого
+/// позвал. Если `piscatio.dll` в стеке есть — виноваты мы, и видно, где
+/// именно; если там один `clr.dll` — рантайм упал сам по себе, и это тоже
+/// ответ.
+///
+/// Символов у нас нет, поэтому смещение придётся смотреть в дизассемблере.
+/// Зато оно стабильно между запусками, в отличие от адреса.
+fn backtrace() -> String {
+    const SKIP: u32 = 1;
+    const DEPTH: usize = 24;
+    let mut frames = [std::ptr::null_mut::<c_void>(); DEPTH];
+    let captured = unsafe { RtlCaptureStackBackTrace(SKIP, &mut frames, None) } as usize;
+    if captured == 0 {
+        return "стек снять не удалось".to_string();
+    }
+    frames[..captured]
+        .iter()
+        .map(|frame| frame_of(*frame as usize))
+        .collect::<Vec<_>>()
+        .join(" <- ")
 }

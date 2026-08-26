@@ -309,6 +309,7 @@ impl Fishing {
         if self.aim.is_some() || self.wait_recast {
             return;
         }
+        let _step = crash::Step::worker(crash::STEP_AIM);
         match game.mouse() {
             Ok((x, y)) if x >= 0 && y >= 0 => {
                 self.aim = Some((x, y));
@@ -382,6 +383,7 @@ impl Fishing {
         if rolled == self.last_bite {
             return;
         }
+        let _step = crash::Step::worker(crash::STEP_BITE);
         self.last_bite = rolled;
 
         // Замер делаем на первом же обнаружении поклёвки, независимо от того,

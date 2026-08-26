@@ -520,6 +520,9 @@ fn handles() -> Option<&'static Handles> {
     if slot.is_none() {
         *slot = attach();
         if slot.is_some() {
+            // Заодно запоминаем, какой поток тут игровой: ловушке падений
+            // это нужно, чтобы сказать, кто именно упал.
+            crash::mark_game_thread();
             crate::log!("ввод: хэндлы рефлексии подняты на игровом потоке");
         }
     }
@@ -538,6 +541,7 @@ fn handles() -> Option<&'static Handles> {
 /// Звать только с игрового потока: хук Present и детур ItemCheck идут
 /// по одному и тому же потоку, так что общие хэндлы безопасны.
 pub fn cursor() -> Option<(i32, i32, bool)> {
+    let _step = crash::Step::game(crash::STEP_CURSOR);
     let handles = handles()?;
     let raw = |field: &Option<Field>, fallback: &Field| -> Option<i32> {
         field
@@ -560,12 +564,14 @@ pub fn cursor() -> Option<(i32, i32, bool)> {
 /// Масштаб интерфейса, выставленный игроком в настройках. Ровно на столько
 /// игра увеличивает свой UI, и наша панель должна расти вместе с ним.
 pub fn ui_scale() -> Option<f32> {
+    let _step = crash::Step::game(crash::STEP_CURSOR);
     handles()?.ui_scale.as_ref()?.get_static().ok()?.as_float()
 }
 
 /// Колесо мыши за этот кадр, в «щелчках»: игра держит его в сотых долях,
 /// один щелчок — 120.
 pub fn wheel() -> i32 {
+    let _step = crash::Step::game(crash::STEP_CURSOR);
     let Some(handles) = handles() else {
         return 0;
     };
@@ -702,6 +708,7 @@ fn make_hovered(api: &TooltipApi, id: i32) -> Option<Hovered> {
 }
 
 pub fn claim_mouse_interface() {
+    let _step = crash::Step::game(crash::STEP_CURSOR);
     let Some(handles) = handles() else {
         return;
     };
