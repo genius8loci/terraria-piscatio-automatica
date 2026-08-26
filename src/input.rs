@@ -34,6 +34,9 @@ static QUICK_STACK: AtomicBool = AtomicBool::new(false);
 /// Признак отдельно, чтобы в простое не брать мьютекс каждый кадр.
 static CHAT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static CHAT_PENDING: AtomicBool = AtomicBool::new(false);
+/// Заявка «сыграть звук квестовой рыбы». Один флаг, а не счётчик: если
+/// две рыбы попались подряд, второй звук поверх первого всё равно не нужен.
+static SOUND: AtomicBool = AtomicBool::new(false);
 /// Сколько строк держим, если игровой поток почему-то их не разбирает.
 const CHAT_LIMIT: usize = 32;
 /// Экранные координаты прицела; -1 — не трогать курсор.
@@ -80,11 +83,30 @@ struct Handles {
     /// Сообщение никуда не уходит — его видит только сам игрок.
     chat_monitor: Option<Field>,
     new_text: Option<Method>,
+    /// Звук квестовой рыбы. Нет — просто не будет звука.
+    sound: Option<SoundApi>,
     /// Всё, что нужно для подсказки предмета. Целиком необязательно:
     /// не нашлось — просто не будет подсказок.
     tooltip: Option<TooltipApi>,
     /// То же для строки поиска: не нашлось — не будет ввода.
     text: Option<TextApi>,
+}
+
+/// Руки игры, которыми играется короткий звук.
+///
+/// `SoundEngine.PlaySound` не годится: у неё четыре перегрузки, и
+/// `Type.GetMethod(String)` на таком имени бросает `AmbiguousMatchException`.
+/// А `LegacySoundPlayer.PlaySound` — одна, и `SoundEngine.LegacySoundPlayer`
+/// как раз её экземпляр. Ей нужны числовые id и вариант звука, они лежат
+/// в `LegacySoundStyle`, на который ссылается `SoundID.BestReforge`.
+struct SoundApi {
+    /// `SoundEngine.LegacySoundPlayer` и его `PlaySound`.
+    player: Field,
+    play: Method,
+    /// `SoundID.BestReforge` и его разбор: `SoundId` — поле, `Style` — свойство.
+    style: Field,
+    style_id: Field,
+    style_variant: Method,
 }
 
 /// Руки игры, которыми набирается текст в строке поиска.
@@ -157,7 +179,8 @@ pub fn on_item_check(_this: *mut c_void) {
     let command = COMMAND.load(Ordering::Acquire);
     let stack = QUICK_STACK.load(Ordering::Acquire);
     let chat = CHAT_PENDING.load(Ordering::Acquire);
-    if command == CMD_NONE && !stack && !chat {
+    let sound = SOUND.load(Ordering::Acquire);
+    if command == CMD_NONE && !stack && !chat && !sound {
         // Быстрый путь: в простое ни одного обращения к CLR.
         return;
     }
@@ -192,6 +215,12 @@ pub fn on_item_check(_this: *mut c_void) {
     if chat {
         let _step = crash::Step::game(crash::STEP_CHAT);
         flush_chat(handles);
+    }
+
+    if sound {
+        SOUND.store(false, Ordering::Release);
+        let _step = crash::Step::game(crash::STEP_SOUND);
+        play_sound(handles);
     }
 
     let _step = crash::Step::game(crash::STEP_CLICK);
@@ -306,9 +335,26 @@ fn attach() -> Option<Handles> {
             .get_type("Terraria.GameContent.UI.Chat.IChatMonitor")
             .ok()
             .and_then(|t| t.method("NewText").ok()),
+        sound: sound_api(&assembly),
         tooltip: tooltip_api(&assembly, &main),
         text: text_api(&main, input.as_ref()),
         _clr: clr,
+    })
+}
+
+/// Собирает всё нужное для короткого звука. Не нашлось — просто не будет
+/// звука, остальное работает.
+fn sound_api(assembly: &Assembly) -> Option<SoundApi> {
+    let engine = assembly.get_type("Terraria.Audio.SoundEngine").ok()?;
+    let legacy = assembly.get_type("Terraria.Audio.LegacySoundPlayer").ok()?;
+    let style_type = assembly.get_type("Terraria.Audio.LegacySoundStyle").ok()?;
+    let sound_id = assembly.get_type("Terraria.ID.SoundID").ok()?;
+    Some(SoundApi {
+        player: engine.field("LegacySoundPlayer").ok()?,
+        play: legacy.method("PlaySound").ok()?,
+        style: sound_id.field("BestReforge").ok()?,
+        style_id: style_type.field("SoundId").ok()?,
+        style_variant: style_type.method("get_Style").ok()?,
     })
 }
 
@@ -378,6 +424,48 @@ pub fn queue_chat(line: String) {
     }
     queue.push(line);
     CHAT_PENDING.store(true, Ordering::Release);
+}
+
+/// Поставить в очередь звук квестовой рыбы. Сыграет его игровой поток
+/// в ближайшем кадре, см. `play_sound`.
+pub fn request_sound() {
+    SOUND.store(true, Ordering::Release);
+}
+
+/// Играет короткий звук руками игры — чтобы он слушался её громкости
+/// и глушился вместе с остальным звуком. Только с игрового потока.
+fn play_sound(handles: &Handles) {
+    let Some(api) = handles.sound.as_ref() else {
+        return;
+    };
+    let (Ok(style), Ok(player)) = (api.style.get_static(), api.player.get_static()) else {
+        return;
+    };
+    if style.is_null() || player.is_null() {
+        return;
+    }
+    let Some(id) = api.style_id.get(&style).ok().and_then(|v| v.as_int()) else {
+        return;
+    };
+    let variant = api
+        .style_variant
+        .invoke(&style, &[])
+        .ok()
+        .and_then(|v| v.as_int())
+        .unwrap_or(1);
+    // Координаты -1 означают «без привязки к месту»: звук звучит ровно так,
+    // как интерфейсный, а не из точки в мире.
+    let _ = api.play.invoke(
+        &player,
+        &[
+            Var::int(id),
+            Var::int(-1),
+            Var::int(-1),
+            Var::int(variant),
+            Var::float(1.0),
+            Var::float(0.0),
+        ],
+    );
 }
 
 /// Отдаёт накопленные строки чату игры. Только с игрового потока: чат —

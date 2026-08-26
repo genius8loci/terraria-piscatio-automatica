@@ -225,7 +225,12 @@ impl Fishing {
         match bobber {
             Ok(Some(bobber)) => {
                 self.hint = Some(bobber.index);
-                state::with(|s| s.status.bobber_cast = true);
+                let where_is = if bobber.wet {
+                    state::Bobber::InWater
+                } else {
+                    state::Bobber::Flying
+                };
+                state::with(|s| s.status.bobber = where_is);
                 self.remember_aim(game);
 
                 if bobber.has_bite() {
@@ -243,7 +248,7 @@ impl Fishing {
                 // появится, заброшен уже при включённой рыбалке, и курсор
                 // в это мгновение стоит там, куда игрок целился.
                 self.wait_recast = false;
-                state::with(|s| s.status.bobber_cast = false);
+                state::with(|s| s.status.bobber = state::Bobber::None);
                 self.on_idle(game, config);
             }
             Err(e) => log!("рыбалка: чтение поплавка не удалось: {e}"),
@@ -439,6 +444,9 @@ impl Fishing {
             chat::item_skipped(config, rolled, &name, whitelist);
         } else if quest {
             chat::quest_caught(config, rolled, &name);
+            // Квестовая рыба попадается редко, и её легко проглядеть в чате.
+            // Звук играет сама игра, чтобы он слушался её громкости.
+            input::request_sound();
         }
     }
 

@@ -149,13 +149,160 @@ impl Config {
 
     pub fn save(&self, dir: &PathBuf) {
         let path = dir.join("piscatio.toml");
-        match toml::to_string_pretty(self) {
-            Ok(text) => {
-                if let Err(e) = std::fs::write(&path, text) {
-                    crate::log!("конфиг не сохранён: {e}");
-                }
-            }
-            Err(e) => crate::log!("конфиг не сериализуется: {e}"),
+        if let Err(e) = std::fs::write(&path, self.to_commented_toml()) {
+            crate::log!("конфиг не сохранён: {e}");
         }
+    }
+
+    /// Конфиг с пояснением к каждой строке.
+    ///
+    /// Собирается вручную, а не `toml::to_string_pretty`: сериализатор
+    /// комментариев не пишет, и файл выходил голым списком имён. Панель
+    /// пересохраняет конфиг на каждом переключении, поэтому текст должен
+    /// восстанавливаться целиком, а не только при создании файла.
+    fn to_commented_toml(&self) -> String {
+        let mode = match self.filter_mode {
+            FilterMode::Blacklist => "blacklist",
+            FilterMode::Whitelist => "whitelist",
+        };
+        let potions = format!(
+            "[{}, {}, {}]",
+            self.potions[0], self.potions[1], self.potions[2]
+        );
+        format!(
+            "# Настройки terraria piscatio automatica.\n\
+             # Файл перезаписывается панелью при каждом переключении,\n\
+             # так что правки руками делайте при закрытой игре.\n\
+             \n\
+             # Режим фильтра улова:\n\
+             #   blacklist — тяну всё, кроме перечисленного в blacklist;\n\
+             #   whitelist — тяну только перечисленное в whitelist.\n\
+             filter_mode = \"{mode}\"\n\
+             \n\
+             # Id предметов, которые НЕ подсекаю в режиме blacklist.\n\
+             blacklist = {blacklist}\n\
+             \n\
+             # Id предметов, которые подсекаю в режиме whitelist.\n\
+             whitelist = {whitelist}\n\
+             \n\
+             # Подсекать ли вражеские спавны — Герцога Рыброна и прочее.\n\
+             # На крючке они приходят отрицательным id, фильтр к ним неприменим.\n\
+             pull_enemy_spawns = {pull_enemy_spawns}\n\
+             \n\
+             # Инвентарь заполнился — разложить по ближайшим сундукам.\n\
+             # Выключено: при полном инвентаре рыбалка просто останавливается,\n\
+             # иначе улов уходил бы в никуда.\n\
+             quick_stack_when_full = {quick_stack_when_full}\n\
+             \n\
+             # Рисовать панель из детура Main.DrawCursor, чтобы игровой курсор\n\
+             # ложился поверх неё. Выключить, если панель подозревают в падении:\n\
+             # тогда она уйдёт в Present и окажется поверх курсора.\n\
+             cursor_detour = {cursor_detour}\n\
+             \n\
+             # Снять троттлинг игры при потере фокуса (Main.ThrottleWhenInactive).\n\
+             # Без этого свёрнутая игра спит по 20 мс на кадр и рыбалка ползёт.\n\
+             disable_inactive_throttle = {disable_inactive_throttle}\n\
+             \n\
+             # Разброс задержек перед забросом и подсечкой, миллисекунды.\n\
+             # Нужен, чтобы действия не шли метрономом.\n\
+             jitter_min_ms = {jitter_min_ms}\n\
+             jitter_max_ms = {jitter_max_ms}\n\
+             \n\
+             # Доливать бафы зельями из инвентаря.\n\
+             auto_potions = {auto_potions}\n\
+             \n\
+             # Какие из трёх зелий пить, по порядку:\n\
+             #   рыбалки (2354), сонара (2355), ящиков (2356).\n\
+             potions = {potions}\n\
+             \n\
+             # Виртуальные коды клавиш (VK). По умолчанию стрелка вверх,\n\
+             # стрелка вниз и Delete.\n\
+             # hotkey_ui     — свернуть и раскрыть панель;\n\
+             # hotkey_toggle — включить и выключить авторыбалку;\n\
+             # hotkey_unload — выгрузить DLL из игры.\n\
+             hotkey_ui = {hotkey_ui}\n\
+             hotkey_toggle = {hotkey_toggle}\n\
+             hotkey_unload = {hotkey_unload}\n\
+             \n\
+             # Писать в чат о том, что автомат делает. Сообщения местные:\n\
+             # их видит только сам игрок, на сервер они не уходят.\n\
+             chat_messages = {chat_messages}\n\
+             \n\
+             # Цвета ярлыков в чате, RGB шестнадцатеричными — как в тегах игры\n\
+             # [c/RRGGBB:текст]. Решётка и регистр не важны, непонятное даёт белый.\n\
+             chat_color_blacklist = \"{chat_color_blacklist}\"  # пропуск по чёрному списку\n\
+             chat_color_whitelist = \"{chat_color_whitelist}\"  # пропуск по белому списку\n\
+             chat_color_quest = \"{chat_color_quest}\"      # квестовая рыба рыбака\n\
+             chat_color_spawn = \"{chat_color_spawn}\"      # вражеский спавн\n\
+             chat_color_potion = \"{chat_color_potion}\"     # автопитьё зелья\n",
+            mode = mode,
+            blacklist = int_list(&self.blacklist),
+            whitelist = int_list(&self.whitelist),
+            pull_enemy_spawns = self.pull_enemy_spawns,
+            quick_stack_when_full = self.quick_stack_when_full,
+            cursor_detour = self.cursor_detour,
+            disable_inactive_throttle = self.disable_inactive_throttle,
+            jitter_min_ms = self.jitter_min_ms,
+            jitter_max_ms = self.jitter_max_ms,
+            auto_potions = self.auto_potions,
+            potions = potions,
+            hotkey_ui = self.hotkey_ui,
+            hotkey_toggle = self.hotkey_toggle,
+            hotkey_unload = self.hotkey_unload,
+            chat_messages = self.chat_messages,
+            chat_color_blacklist = self.chat_color_blacklist,
+            chat_color_whitelist = self.chat_color_whitelist,
+            chat_color_quest = self.chat_color_quest,
+            chat_color_spawn = self.chat_color_spawn,
+            chat_color_potion = self.chat_color_potion,
+        )
+    }
+}
+
+/// Список id в строку TOML.
+fn int_list(values: &[i32]) -> String {
+    let items: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+    format!("[{}]", items.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Конфиг пишется руками, а читается `serde`. Значит, написанное должно
+    /// читаться обратно — иначе первое же сохранение сделает файл битым,
+    /// и заметит это только пользователь.
+    #[test]
+    fn commented_toml_reads_back() {
+        let mut written = Config::default();
+        written.filter_mode = FilterMode::Whitelist;
+        written.whitelist = vec![2290, 2297];
+        written.blacklist = vec![];
+        written.potions = [false, true, false];
+        written.jitter_min_ms = 7;
+        written.chat_messages = false;
+        written.chat_color_quest = "ABCDEF".to_string();
+
+        let text = written.to_commented_toml();
+        let read: Config = toml::from_str(&text).expect("конфиг не читается обратно");
+
+        assert_eq!(read.filter_mode, written.filter_mode);
+        assert_eq!(read.whitelist, written.whitelist);
+        assert_eq!(read.blacklist, written.blacklist);
+        assert_eq!(read.potions, written.potions);
+        assert_eq!(read.jitter_min_ms, written.jitter_min_ms);
+        assert_eq!(read.chat_messages, written.chat_messages);
+        assert_eq!(read.chat_color_quest, written.chat_color_quest);
+        assert_eq!(read.hotkey_unload, written.hotkey_unload);
+    }
+
+    /// Цвет из конфига должен доезжать до тега игры в шести цифрах,
+    /// а мусор — не ломать сообщение.
+    #[test]
+    fn chat_color_is_forgiving() {
+        assert_eq!(chat_color("#ff0000"), "FF0000");
+        assert_eq!(chat_color(" 2a2A2a "), "2A2A2A");
+        assert_eq!(chat_color("нет"), "FFFFFF");
+        assert_eq!(chat_color(""), "FFFFFF");
     }
 }

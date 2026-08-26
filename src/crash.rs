@@ -54,6 +54,7 @@ pub const STEP_STOCK: u8 = 8;
 pub const STEP_POTIONS: u8 = 9;
 pub const STEP_ROD: u8 = 10;
 pub const STEP_LANG: u8 = 11;
+pub const STEP_SOUND: u8 = 12;
 
 fn step_name(step: u8) -> &'static str {
     match step {
@@ -68,6 +69,7 @@ fn step_name(step: u8) -> &'static str {
         STEP_POTIONS => "зелья",
         STEP_ROD => "удочка в руке",
         STEP_LANG => "язык игры",
+        STEP_SOUND => "звук квестовой рыбы",
         _ => "ничего",
     }
 }

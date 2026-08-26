@@ -1,0 +1,62 @@
+# Сборка релиза под ту единственную цель, в которой имеет смысл DLL:
+# Terraria 1.4.5 — 32-битный процесс, значит i686-pc-windows-msvc.
+#
+# По GitHub Flow ветка одна, а релизы помечаются тегами. Поэтому сборка
+# идёт на теге вида v0.4.5, а не на каждом пуше в main: на main гоняется
+# только проверка, что всё собирается и тесты зелёные.
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  # Чтобы можно было собрать релиз руками, не заводя тег.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Поставить toolchain и цель
+        run: rustup target add i686-pc-windows-msvc
+
+      # Кэш заметно экономит время: зависимостей немного, но windows-crate
+      # собирается долго.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: i686-pc-windows-msvc
+
+      - name: Проверить форматирование
+        run: cargo fmt --all --check
+
+      - name: Проверить clippy
+        run: cargo clippy --release --target i686-pc-windows-msvc
+
+      - name: Тесты
+        run: cargo test --release --target i686-pc-windows-msvc
+
+      - name: Собрать DLL
+        run: cargo build --release --target i686-pc-windows-msvc
+
+      # Артефакт к каждой сборке: удобно забрать DLL и без релиза.
+      - name: Приложить DLL к сборке
+        uses: actions/upload-artifact@v4
+        with:
+          name: piscatio-dll
+          path: target/i686-pc-windows-msvc/release/piscatio.dll
+          if-no-files-found: error
+
+      # Тег -> релиз. Заметки GitHub соберёт сам по коммитам с прошлого тега.
+      - name: Выложить релиз
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/i686-pc-windows-msvc/release/piscatio.dll
+          generate_release_notes: true

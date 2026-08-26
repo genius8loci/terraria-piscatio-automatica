@@ -134,6 +134,12 @@ const CROSS_TEXTURE_SIZE: f32 = 32.0;
 /// Тот же множитель нужен нам, чтобы иконки совпадали с игровыми один в один.
 pub const INVENTORY_SCALE: f32 = 0.85;
 
+/// Насколько опустить текст относительно математической середины строки.
+/// По цифрам он ровно посередине, а на глаз кажется завышенным: видимая
+/// часть шрифта игры несимметрична — выносные элементы вверх длиннее,
+/// чем вниз.
+const TEXT_DROP: f32 = 2.0;
+
 /// Обводка текста: игра рисует её в два пикселя при масштабе 1.
 const SHADOW: f32 = 2.0;
 const SHADOW_COLOR: u32 = 0xFF_000000;
@@ -927,7 +933,8 @@ impl<'a> Painter<'a> {
             return y;
         };
         let ink = font.ink_height() * self.scale;
-        (y + (h - ink) * 0.5 - font.ink_top * self.scale).round()
+        let drop = (TEXT_DROP * self.scale).round();
+        (y + (h - ink) * 0.5 - font.ink_top * self.scale + drop).round()
     }
 
     /// Строка по центру коробки — и по вертикали, и по горизонтали.

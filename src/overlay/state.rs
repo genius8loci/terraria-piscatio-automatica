@@ -37,11 +37,21 @@ pub struct ItemFacts {
     pub quest: bool,
 }
 
+/// Где сейчас поплавок. «Летит» — снаряд уже есть, но воды ещё не коснулся:
+/// это `Projectile.wet` у самой игры.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Bobber {
+    #[default]
+    None,
+    Flying,
+    InWater,
+}
+
 #[derive(Default)]
 pub struct Status {
     pub connected: String,
     pub fishing: String,
-    pub bobber_cast: bool,
+    pub bobber: Bobber,
     /// Куда забрасываем. `None` — ждём, пока игрок бросит удочку сам.
     pub aim: Option<(i32, i32)>,
     /// Включились, когда поплавок уже лежал в воде: точку заброса по нему

@@ -70,6 +70,17 @@ pub const LIST_WHITE: i32 = -23;
 pub const LIST_BLACK: i32 = -24;
 /// Насколько притемняется катушка под чёрный список, по каналу.
 const LIST_DARKEN: u8 = 80;
+/// Строка про врагов: включено — иконка баффа «Ездовой единорог»
+/// (`Buff_162`), выключено — «Ездовой величественный скакун» (`Buff_276`)
+/// без цвета. Обесцвеченной картинки в игре нет, делаем из обычной.
+pub const ENEMY_ON: i32 = -25;
+pub const ENEMY_OFF_SOURCE: i32 = -26;
+pub const ENEMY_OFF: i32 = -27;
+/// Строка про автопитьё: чашка кофе (`Item_5042`), включено в цвете,
+/// выключено обесцвеченной. Картинка — лента из трёх кадров по 32x26,
+/// берём верхний.
+pub const POTION_ON: i32 = -28;
+pub const POTION_OFF: i32 = -29;
 
 /// Ширина рамки при девятичастной нарезке, в пикселях исходной текстуры.
 /// Для панели это раскладка самой игры: 12 + 4 + 12 = 28.
@@ -94,6 +105,10 @@ const UI_ASSETS: &[(i32, &str, Option<[u32; 4]>)] = &[
     (CHEST_OFF, "UI/ChestStack_0", None),
     (CHEST_ON, "UI/ChestStack_1", None),
     (LIST_WHITE, "Item_2373", None),
+    (ENEMY_ON, "Buff_162", None),
+    (ENEMY_OFF_SOURCE, "Buff_276", None),
+    // У кофе в файле лента из трёх кадров сверху вниз, нужен верхний.
+    (POTION_ON, "Item_5042", Some([0, 0, 32, 26])),
     // Золотая рамка из бестиария: ей игра показывает наведение на кнопку.
     (FRAME_SMALL, "UI/Bestiary/Button_Search_Border", None),
     (BAR_TRACK, "UI/Scrollbar", None),
@@ -155,6 +170,14 @@ pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
     if let Some((_, light)) = loaded.iter().find(|(id, _)| *id == LIST_WHITE) {
         let dark = darkened(light, LIST_DARKEN);
         loaded.push((LIST_BLACK, dark));
+    }
+    // Выключенные состояния — те же картинки без цвета. Так игра и сама
+    // отличает погасшее от живого, но готовых серых копий у неё нет.
+    for (source, target) in [(ENEMY_OFF_SOURCE, ENEMY_OFF), (POTION_ON, POTION_OFF)] {
+        if let Some((_, color)) = loaded.iter().find(|(id, _)| *id == source) {
+            let gray = grayscale(color);
+            loaded.push((target, gray));
+        }
     }
 
     for &(id, frames) in items {
@@ -235,6 +258,28 @@ fn darkened(image: &xnb::Image, by: u8) -> xnb::Image {
         .map(|&p| {
             let channel = |shift: u32| (((p >> shift) & 0xFF) as u8).saturating_sub(by) as u32;
             (p & 0xFF00_0000) | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+        })
+        .collect();
+    xnb::Image {
+        width: image.width,
+        height: image.height,
+        pixels,
+    }
+}
+
+/// Та же картинка без цвета. Веса каналов — обычные для яркости: глаз
+/// видит зелёный сильнее красного, а синий слабее всех, и без весов
+/// картинка выходит плоской.
+fn grayscale(image: &xnb::Image) -> xnb::Image {
+    let pixels = image
+        .pixels
+        .iter()
+        .map(|&p| {
+            let channel = |shift: u32| ((p >> shift) & 0xFF) as f32;
+            let gray = (channel(16) * 0.299 + channel(8) * 0.587 + channel(0) * 0.114)
+                .round()
+                .clamp(0.0, 255.0) as u32;
+            (p & 0xFF00_0000) | (gray << 16) | (gray << 8) | gray
         })
         .collect();
     xnb::Image {

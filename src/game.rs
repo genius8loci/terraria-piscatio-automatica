@@ -32,6 +32,8 @@ pub struct Bobber {
     /// `localAI[1]`: при поклёвке — id предмета (> 0) либо минус id NPC (< 0).
     /// В простое — счётчик накопления поклёвки.
     pub local_ai1: f32,
+    /// `Projectile.wet` — поплавок уже в воде. Пока нет, он ещё летит.
+    pub wet: bool,
 }
 
 impl Bobber {
@@ -78,6 +80,9 @@ pub struct Game {
     pr_owner: Field,
     pr_ai: Field,
     pr_local_ai: Field,
+    /// `Projectile.wet` — поплавок коснулся воды. Необязательно: не нашлось —
+    /// панель просто не станет различать полёт и воду.
+    pr_wet: Option<Field>,
 
     pl_inventory: Field,
     pl_control_use_item: Field,
@@ -163,6 +168,7 @@ impl Game {
             pr_owner: projectile.field("owner")?,
             pr_ai: projectile.field("ai")?,
             pr_local_ai: projectile.field("localAI")?,
+            pr_wet: projectile.field("wet").ok(),
 
             pl_inventory: player.field("inventory")?,
             pl_control_use_item: player.field("controlUseItem")?,
@@ -545,6 +551,14 @@ impl Game {
                 index: i,
                 ai1: array_get(&ai, 1)?.as_float().unwrap_or(0.0),
                 local_ai1: array_get(&local_ai, 1)?.as_float().unwrap_or(0.0),
+                wet: self
+                    .pr_wet
+                    .as_ref()
+                    .and_then(|f| f.get(&projectile).ok())
+                    .and_then(|v| v.as_bool())
+                    // Поля нет — считаем, что уже долетел: так панель ведёт
+                    // себя как раньше, а не врёт про вечный полёт.
+                    .unwrap_or(true),
             }))
         }
     }

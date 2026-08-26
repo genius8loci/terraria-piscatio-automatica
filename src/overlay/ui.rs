@@ -74,6 +74,21 @@ const LIST: Knob = Knob {
     w: 22.0,
     h: 22.0,
 };
+/// Строка про врагов: иконки баффов ездовых. Единорог — подсекаем,
+/// обесцвеченный скакун — нет. Картинки квадратные, 32x32.
+const ENEMY: Knob = Knob {
+    on: icons::ENEMY_ON,
+    off: icons::ENEMY_OFF,
+    w: 24.0,
+    h: 24.0,
+};
+/// Строка про автопитьё: чашка кофе, в цвете и без. Кадр 32x26.
+const POTION: Knob = Knob {
+    on: icons::POTION_ON,
+    off: icons::POTION_OFF,
+    w: 24.0,
+    h: 19.5,
+};
 /// Насколько кнопка-переключатель выше строки — с каждой стороны.
 /// Столько же уходит в просвет между строкой и кнопкой.
 const KNOB_OVER: f32 = 2.0;
@@ -366,11 +381,6 @@ impl<'a, 'b> Layout<'a, 'b> {
     }
 
     /// Переключатель, прижатый к правому краю строки, вместе с подписью слева.
-    fn switch_row(&mut self, r: Rect, label: &str, on: bool) -> bool {
-        self.switch_row_note(r, label, "", colors::TEXT, STAR, on)
-    }
-
-    /// То же, но своей картинкой переключателя.
     fn switch_row_knob(&mut self, r: Rect, label: &str, knob: Knob, on: bool) -> bool {
         self.switch_row_note(r, label, "", colors::TEXT, knob, on)
     }
@@ -609,7 +619,7 @@ pub fn build(
         quick_stack,
         auto_potions,
         enemies,
-        cast,
+        bobber,
         aim,
         recast,
         free,
@@ -621,7 +631,7 @@ pub fn build(
             s.quick_stack,
             s.auto_potions,
             s.pull_enemy_spawns,
-            s.status.bobber_cast,
+            s.status.bobber,
             s.status.aim,
             s.status.recast,
             s.status.free_slots,
@@ -630,7 +640,16 @@ pub fn build(
         )
     })
     .unwrap_or((
-        false, true, false, false, false, None, false, -1, [false; 3], [false; 3],
+        false,
+        true,
+        false,
+        false,
+        state::Bobber::None,
+        None,
+        false,
+        -1,
+        [false; 3],
+        [false; 3],
     ));
 
     // Точка заброса важна настолько, что выносится прямо в подпись:
@@ -662,7 +681,7 @@ pub fn build(
     }
 
     let r = next_row(&mut cursor);
-    if layout.switch_row(r, t.pull_enemies, enemies) {
+    if layout.switch_row_knob(r, t.pull_enemies, ENEMY, enemies) {
         state::with(|s| {
             s.pull_enemy_spawns = !s.pull_enemy_spawns;
             s.dirty = true;
@@ -670,35 +689,15 @@ pub fn build(
     }
 
     // --- статус поплавка ---------------------------------------------------
-    // Та же звёздочка, что у переключателей, но кликать по ней нечего.
+    // Только текст: переключать тут нечего, а звёздочка рядом с кнопками
+    // читалась выключенным переключателем.
     let r = next_row(&mut cursor);
-    layout.row_bg(r);
-    layout
-        .painter
-        .text_left(r.x + pad, r.y, r.h, t.bobber, colors::TEXT);
-    let label = if cast { t.bobber_cast } else { t.bobber_none };
-    let label_w = layout.painter.measure(label);
-    let size = (TOGGLE * scale).round();
-    layout.painter.stretch(
-        if cast {
-            icons::TOGGLE_ON
-        } else {
-            icons::TOGGLE_OFF
-        },
-        (r.x + r.w - pad - label_w - size - GAP * scale).round(),
-        (r.y + (r.h - size) * 0.5).round(),
-        size,
-        size,
-        colors::PLAIN,
-    );
-    layout.painter.text_right(
-        r.x,
-        r.y,
-        r.w - pad,
-        r.h,
-        label,
-        if cast { colors::ON } else { colors::MUTED },
-    );
+    let (label, label_color) = match bobber {
+        state::Bobber::None => (t.bobber_none, colors::MUTED),
+        state::Bobber::Flying => (t.bobber_flying, colors::RARE_ORANGE),
+        state::Bobber::InWater => (t.bobber_cast, colors::ON),
+    };
+    layout.value_row(r, t.bobber, label, label_color);
 
     // --- свободные ячейки --------------------------------------------------
     let r = next_row(&mut cursor);
@@ -711,7 +710,7 @@ pub fn build(
 
     // --- автопитьё ---------------------------------------------------------
     let r = next_row(&mut cursor);
-    if layout.switch_row(r, t.auto_potions, auto_potions) {
+    if layout.switch_row_knob(r, t.auto_potions, POTION, auto_potions) {
         state::with(|s| {
             s.auto_potions = !s.auto_potions;
             s.dirty = true;
@@ -719,10 +718,24 @@ pub fn build(
     }
 
     // --- ячейки зелий ------------------------------------------------------
-    layout
-        .painter
-        .text_left(inner_x, cursor, slot, t.potions_shelf, colors::TEXT);
+    // Подпись на такой же подложке, что и строки выше, только высотой
+    // с обычную строку и обрывается перед ячейками: так она встаёт в один
+    // ряд с остальным текстом, а не висит на голой панели.
     let mut slot_x = inner_x + inner_w - slot * 3.0 - GAP * 2.0 * scale;
+    let shelf = Rect {
+        x: inner_x,
+        y: (cursor + (slot - row_h) * 0.5).round(),
+        w: (slot_x - inner_x - GAP * scale).max(row_h),
+        h: row_h,
+    };
+    layout.row_bg(shelf);
+    layout.painter.text_left(
+        shelf.x + pad,
+        shelf.y,
+        shelf.h,
+        t.potions_shelf,
+        colors::TEXT,
+    );
     for (index, (item, _, _)) in crate::game::POTIONS.iter().enumerate() {
         let cell = Rect {
             x: slot_x,
@@ -1275,9 +1288,10 @@ fn stats_window(layout: &mut Layout, x: f32, y: f32, w: f32, scale: f32) {
     let inner_x = panel.x + pad;
     let inner_w = panel.w - pad * 2.0;
     let mut cursor = panel.y + pad;
+    // Заголовок по центру — как в окне фильтра.
     layout
         .painter
-        .text(inner_x, cursor, t.tab_stats, colors::TITLE);
+        .text_centered(inner_x, cursor, inner_w, row_h, t.tab_stats, colors::TITLE);
     cursor += row_h;
 
     for (label, value) in rows {
