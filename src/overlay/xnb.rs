@@ -119,7 +119,7 @@ impl<'a> Reader<'a> {
 
     fn string(&mut self) -> Option<String> {
         let len = self.varint()? as usize;
-        Some(String::from_utf8(self.take(len)?.to_vec()).ok()?)
+        String::from_utf8(self.take(len)?.to_vec()).ok()
     }
 
     /// `BinaryReader.ReadChar` читает символ в UTF-8, 1..4 байта.
@@ -385,12 +385,14 @@ fn pack(
     let mut decoded: HashMap<usize, Vec<u32>> = HashMap::new();
     for (ch, page_index, i, x, y) in placements {
         let page = &pages[page_index];
-        if !decoded.contains_key(&page_index) {
+        if let std::collections::hash_map::Entry::Vacant(e) = decoded.entry(page_index) {
             let source = body.get(page.data.clone())?;
-            decoded.insert(
-                page_index,
-                decode_surface(page.format, page.width, page.height, source)?,
-            );
+            e.insert(decode_surface(
+                page.format,
+                page.width,
+                page.height,
+                source,
+            )?);
         }
         let surface = &decoded[&page_index];
 
@@ -481,7 +483,9 @@ fn decode_color(width: u32, height: u32, data: &[u8]) -> Option<Vec<u32>> {
         return None;
     }
     Some(
-        data.chunks_exact(4)
+        data.as_chunks::<4>()
+            .0
+            .iter()
             .take(count)
             .map(|p| {
                 let (r, g, b, a) = (p[0] as u32, p[1] as u32, p[2] as u32, p[3] as u32);
@@ -538,7 +542,7 @@ fn decode_dxt3(width: u32, height: u32, data: &[u8]) -> Option<Vec<u32>> {
                     let texel = row * 4 + col;
                     let index = ((indices >> (texel * 2)) & 0x3) as usize;
                     let a4 = ((alpha >> (texel * 4)) & 0xF) as u32;
-                    let a = (a4 * 255 / 15) as u32;
+                    let a = a4 * 255 / 15;
                     let (r, g, b) = palette[index];
                     out[(y * width + x) as usize] =
                         (a << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;

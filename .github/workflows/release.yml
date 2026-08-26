@@ -61,10 +61,17 @@ jobs:
       # Версия — из Cargo.toml, она же в свойствах DLL и в заголовке панели.
       # Заодно смотрим, не выкладывали ли её уже: иначе каждый пуш в main
       # переписывал бы один и тот же релиз.
-      - name: Узнать версию
+      #
+      # Заметки к релизу — сообщение того коммита, которым версию и привезли.
+      # Автосводка GitHub давала одну строку «Full Changelog», а осмысленное
+      # описание пишется руками в коммите, его и берём.
+      - name: Узнать версию и заметки
         id: meta
         shell: pwsh
         run: |
+          # Без этого git отдаёт кириллицу в другой кодировке и в релиз
+          # уезжают кракозябры.
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $line = Get-Content Cargo.toml | Select-String -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
           $version = $line.Matches[0].Groups[1].Value
           $tag = "v$version"
@@ -72,7 +79,12 @@ jobs:
           if (git ls-remote --tags origin "refs/tags/$tag") { $exists = "yes" }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag" -Encoding utf8
           Add-Content -Path $env:GITHUB_OUTPUT -Value "exists=$exists" -Encoding utf8
+
+          $notes = ((git log -1 --pretty=%B) -join "`n").Trim()
+          if (-not $notes) { $notes = $tag }
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
           Write-Output "версия $version, тег $tag, уже выложен: '$exists'"
+          Write-Output "заметки:`n$notes"
 
       # Релиз выкладывается, когда версия новая либо когда тег пришёл руками.
       # `action-gh-release` сам заводит тег на текущем коммите, если его нет.
@@ -83,4 +95,4 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.tag }}
           files: target/i686-pc-windows-msvc/release/piscatio.dll
-          generate_release_notes: true
+          body_path: release-notes.md

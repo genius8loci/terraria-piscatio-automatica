@@ -402,10 +402,11 @@ impl Game {
             }
             let n = array_len(&ids).unwrap_or(0);
             for j in 0..n {
-                if let Some(id) = array_get(&ids, j)?.as_int() {
-                    if id > 0 && !items.contains(&id) {
-                        items.push(id);
-                    }
+                if let Some(id) = array_get(&ids, j)?.as_int()
+                    && id > 0
+                    && !items.contains(&id)
+                {
+                    items.push(id);
                 }
             }
         }
@@ -509,12 +510,11 @@ impl Game {
         }
         let projectiles = self.f_projectile.get_static()?;
 
-        if let Some(i) = hint {
-            if (0..MAX_PROJECTILES).contains(&i) {
-                if let Some(bobber) = self.read_bobber(&projectiles, i, me)? {
-                    return Ok(Some(bobber));
-                }
-            }
+        if let Some(i) = hint
+            && (0..MAX_PROJECTILES).contains(&i)
+            && let Some(bobber) = self.read_bobber(&projectiles, i, me)?
+        {
+            return Ok(Some(bobber));
         }
 
         for i in 0..MAX_PROJECTILES {

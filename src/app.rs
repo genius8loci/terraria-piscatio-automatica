@@ -142,7 +142,7 @@ pub fn run(dll_dir: PathBuf) {
 
         if game.is_none() && !gave_up && Instant::now() >= next_attach {
             attempts += 1;
-            let verbose = attempts == 1 || attempts % 10 == 0;
+            let verbose = attempts == 1 || attempts.is_multiple_of(10);
             match Game::attach(verbose) {
                 Ok(mut attached) => {
                     log!("подключились к игре с попытки {attempts}");

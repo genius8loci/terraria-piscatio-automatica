@@ -1,6 +1,6 @@
 //! Конфиг в TOML рядом с DLL. Всё, что переключается в UI, живёт здесь.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -125,7 +125,7 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load(dir: &PathBuf) -> Self {
+    pub fn load(dir: &Path) -> Self {
         let path = dir.join("piscatio.toml");
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
@@ -147,7 +147,7 @@ impl Config {
         }
     }
 
-    pub fn save(&self, dir: &PathBuf) {
+    pub fn save(&self, dir: &Path) {
         let path = dir.join("piscatio.toml");
         if let Err(e) = std::fs::write(&path, self.to_commented_toml()) {
             crate::log!("конфиг не сохранён: {e}");
