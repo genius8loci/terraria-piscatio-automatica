@@ -18,6 +18,7 @@ use windows::core::IUnknown;
 use crate::clr::{
     Assembly, BINDING_NON_PUBLIC, BINDING_STATIC, Clr, Field, Method, Type, Var, array_get,
 };
+use crate::crash;
 
 pub const CMD_NONE: u8 = 0;
 /// Нажать в этом кадре.
@@ -184,13 +185,16 @@ pub fn on_item_check(_this: *mut c_void) {
 
     if stack {
         QUICK_STACK.store(false, Ordering::Release);
+        let _step = crash::Step::game(crash::STEP_QUICK_STACK);
         quick_stack(handles);
     }
 
     if chat {
+        let _step = crash::Step::game(crash::STEP_CHAT);
         flush_chat(handles);
     }
 
+    let _step = crash::Step::game(crash::STEP_CLICK);
     match command {
         CMD_PRESS => {
             let aim_x = AIM_X.load(Ordering::Relaxed);
@@ -503,6 +507,7 @@ pub fn wheel() -> i32 {
 /// экземпляр `Item` — заведённый один раз клоном и настроенный по id.
 /// Звать только с игрового потока, изнутри отрисовки интерфейса.
 pub fn show_item_tooltip(id: i32) {
+    let _step = crash::Step::game(crash::STEP_ITEM_TOOLTIP);
     let Some(handles) = handles() else {
         return;
     };
@@ -536,6 +541,7 @@ pub fn show_item_tooltip(id: i32) {
 /// их не подставляет, поэтому передаём ровно то, что подставил бы компилятор.
 /// Звать только с игрового потока, изнутри отрисовки интерфейса.
 pub fn show_text_tooltip(text: &str) {
+    let _step = crash::Step::game(crash::STEP_TEXT_TOOLTIP);
     let Some(handles) = handles() else {
         return;
     };
@@ -574,6 +580,7 @@ pub fn show_text_tooltip(text: &str) {
 /// поднимается заново: игра гасит его каждый кадр, так что стоит перестать
 /// звать — и клавиши сразу вернутся игроку.
 pub fn edit_text(current: &str) -> Option<String> {
+    let _step = crash::Step::game(crash::STEP_SEARCH_TEXT);
     let handles = handles()?;
     let api = handles.text.as_ref()?;
 

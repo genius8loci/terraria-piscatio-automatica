@@ -77,6 +77,8 @@ const LIST: Knob = Knob {
 /// Насколько кнопка-переключатель выше строки — с каждой стороны.
 /// Столько же уходит в просвет между строкой и кнопкой.
 const KNOB_OVER: f32 = 2.0;
+/// Поле между краем кнопки и картинкой в ней, с каждой стороны.
+const KNOB_INSET: f32 = 2.0;
 /// Сторона уголка на кнопке сворачивания.
 const CHEVRON: f32 = 16.0;
 /// Подсказка в пустой строке поиска — как у игры в её собственных полях.
@@ -340,7 +342,13 @@ impl<'a, 'b> Layout<'a, 'b> {
     fn toggle(&mut self, place: Rect, knob: Knob, on: bool) -> bool {
         let clicked = self.hit(place);
         let id = if on { knob.on } else { knob.off };
-        let fit = (place.w / knob.w).min(place.h / knob.h);
+        // Картинка не во всю кнопку: во всю она выглядит громоздкой, а поле
+        // вокруг неё заодно оставляет место золотой рамке наведения.
+        // Нажимается при этом вся кнопка целиком.
+        let inset = (KNOB_INSET * self.scale).round().max(1.0) * 2.0;
+        let room_w = (place.w - inset).max(1.0);
+        let room_h = (place.h - inset).max(1.0);
+        let fit = (room_w / knob.w).min(room_h / knob.h);
         let w = (knob.w * fit).round();
         let h = (knob.h * fit).round();
         self.painter.stretch(

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::chat;
 use crate::config::Config;
+use crate::crash;
 use crate::detour;
 use crate::game::{Game, POTIONS};
 use crate::input;
@@ -218,7 +219,10 @@ impl Fishing {
             self.drink_potions(game, config);
         }
 
-        match game.find_bobber(self.hint) {
+        let step = crash::Step::worker(crash::STEP_BOBBER);
+        let bobber = game.find_bobber(self.hint);
+        drop(step);
+        match bobber {
             Ok(Some(bobber)) => {
                 self.hint = Some(bobber.index);
                 state::with(|s| s.status.bobber_cast = true);
@@ -275,6 +279,7 @@ impl Fishing {
         if !self.enabled() || self.aim.is_none() {
             return;
         }
+        let _step = crash::Step::worker(crash::STEP_ROD);
         let Ok(Some(player)) = game.local_player() else {
             return;
         };
@@ -310,6 +315,7 @@ impl Fishing {
     }
 
     fn refresh_stock(&mut self, game: &Game) -> (i32, i32) {
+        let _step = crash::Step::worker(crash::STEP_STOCK);
         let Ok(Some(player)) = game.local_player() else {
             state::with(|s| {
                 s.status.bait = -1;
@@ -336,6 +342,7 @@ impl Fishing {
 
     /// Автопитьё: доливаем только те бафы, что выбраны в панели и погасли.
     fn drink_potions(&mut self, game: &Game, config: &Config) {
+        let _step = crash::Step::worker(crash::STEP_POTIONS);
         let (enabled, selected) =
             state::with(|s| (s.auto_potions, s.potions)).unwrap_or((false, [false; 3]));
         if !enabled {

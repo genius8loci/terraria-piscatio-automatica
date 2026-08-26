@@ -12,7 +12,7 @@
 //! обрабатываются штатно.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use windows::Win32::Foundation::{
     EXCEPTION_ACCESS_VIOLATION, EXCEPTION_ILLEGAL_INSTRUCTION, EXCEPTION_STACK_OVERFLOW,
@@ -32,6 +32,71 @@ static HANDLE: AtomicUsize = AtomicUsize::new(0);
 /// Сколько записей уже сделали: лог не должен превратиться в поток.
 static LOGGED: AtomicU32 = AtomicU32::new(0);
 const MAX_LOGGED: u32 = 4;
+
+// ---------------------------------------------------------------------------
+// Чем мы были заняты
+// ---------------------------------------------------------------------------
+//
+// По одному адресу в `clr.dll` не видно, чей вызов туда зашёл: рефлексию
+// зовут оба наших потока. Поэтому каждый помечает, что именно он начал,
+// и отметка снимается сама, когда вызов вернулся. В падении обе отметки
+// попадают в строку — и «фантомное» падение перестаёт быть фантомным.
+
+pub const STEP_NONE: u8 = 0;
+pub const STEP_CLICK: u8 = 1;
+pub const STEP_QUICK_STACK: u8 = 2;
+pub const STEP_CHAT: u8 = 3;
+pub const STEP_ITEM_TOOLTIP: u8 = 4;
+pub const STEP_TEXT_TOOLTIP: u8 = 5;
+pub const STEP_SEARCH_TEXT: u8 = 6;
+pub const STEP_BOBBER: u8 = 7;
+pub const STEP_STOCK: u8 = 8;
+pub const STEP_POTIONS: u8 = 9;
+pub const STEP_ROD: u8 = 10;
+pub const STEP_LANG: u8 = 11;
+
+fn step_name(step: u8) -> &'static str {
+    match step {
+        STEP_CLICK => "нажатие",
+        STEP_QUICK_STACK => "раскладка по сундукам",
+        STEP_CHAT => "строка в чат",
+        STEP_ITEM_TOOLTIP => "подсказка предмета",
+        STEP_TEXT_TOOLTIP => "текстовая подсказка",
+        STEP_SEARCH_TEXT => "набор в строке поиска",
+        STEP_BOBBER => "чтение поплавка",
+        STEP_STOCK => "наживка и ячейки",
+        STEP_POTIONS => "зелья",
+        STEP_ROD => "удочка в руке",
+        STEP_LANG => "язык игры",
+        _ => "ничего",
+    }
+}
+
+static GAME_STEP: AtomicU8 = AtomicU8::new(STEP_NONE);
+static WORKER_STEP: AtomicU8 = AtomicU8::new(STEP_NONE);
+
+/// Отметка «сейчас идёт такой-то вызов», снимается сама при выходе.
+pub struct Step(&'static AtomicU8);
+
+impl Step {
+    /// Вызов с игрового потока: детур `ItemCheck` и отрисовка панели.
+    pub fn game(step: u8) -> Step {
+        GAME_STEP.store(step, Ordering::Relaxed);
+        Step(&GAME_STEP)
+    }
+
+    /// Вызов с рабочего потока.
+    pub fn worker(step: u8) -> Step {
+        WORKER_STEP.store(step, Ordering::Relaxed);
+        Step(&WORKER_STEP)
+    }
+}
+
+impl Drop for Step {
+    fn drop(&mut self) {
+        self.0.store(STEP_NONE, Ordering::Relaxed);
+    }
+}
 
 pub fn install() {
     if HANDLE.load(Ordering::SeqCst) != 0 {
@@ -91,9 +156,12 @@ unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
     }
 
     crate::log!(
-        "ПАДЕНИЕ: код 0x{:08X} по адресу 0x{address:08X} в {}{detail}",
+        "ПАДЕНИЕ: код 0x{:08X} по адресу 0x{address:08X} в {}{detail} \
+         | игровой поток: {}, рабочий: {}",
         code.0,
-        module_of(address)
+        module_of(address),
+        step_name(GAME_STEP.load(Ordering::Relaxed)),
+        step_name(WORKER_STEP.load(Ordering::Relaxed))
     );
     CONTINUE_SEARCH
 }

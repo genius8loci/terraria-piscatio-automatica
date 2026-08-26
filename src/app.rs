@@ -16,12 +16,15 @@ use crate::config::{Config, FilterMode};
 use crate::fishing::Fishing;
 use crate::game::Game;
 use crate::overlay::state::{self, Mark};
-use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, detour, input, lang, log, overlay};
+use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, crash, detour, input, lang, log, overlay};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// Чтение состояния игры заметно дороже опроса клавиш.
 const TICK_INTERVAL: Duration = Duration::from_millis(120);
 const STATUS_INTERVAL: Duration = Duration::from_secs(30);
+/// Как часто перечитывать язык игры. Игрок меняет его прямо в настройках,
+/// не выходя из мира, а вызов стоит одного обращения к рефлексии.
+const LANG_INTERVAL: Duration = Duration::from_secs(2);
 /// Игра может быть ещё в сплэше — сборка Terraria появится не сразу.
 const ATTACH_RETRY: Duration = Duration::from_millis(750);
 const ATTACH_ATTEMPTS: u32 = 40;
@@ -73,6 +76,15 @@ pub fn run(dll_dir: PathBuf) {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 
+    // Первой строкой — кто именно запустился. В логе накапливаются сессии
+    // разных сборок, и без версии непонятно, к какой относится запись.
+    log!(
+        "{} v{}, DLL из {}",
+        env!("CARGO_PKG_DESCRIPTION"),
+        env!("CARGO_PKG_VERSION"),
+        dll_dir.display()
+    );
+
     let mut config = Config::load(&dll_dir);
     push_config(&config);
     log!(
@@ -95,6 +107,7 @@ pub fn run(dll_dir: PathBuf) {
     let mut fishing = Fishing::new();
     let mut last_tick = Instant::now() - TICK_INTERVAL;
     let mut last_status = Instant::now();
+    let mut last_lang = Instant::now();
 
     // Стрелка сворачивания видна с самого начала: без неё панель нечем
     // открыть мышью, а хоткей знает не всякий.
@@ -188,6 +201,26 @@ pub fn run(dll_dir: PathBuf) {
             if last_tick.elapsed() >= TICK_INTERVAL {
                 last_tick = Instant::now();
                 fishing.tick(attached, &config);
+            }
+            // Язык игрок может переключить прямо в игре, не выходя из мира.
+            // Перечитываем культуру время от времени: вызов дешёвый, а иначе
+            // панель осталась бы на языке, который был при инжекте.
+            if last_lang.elapsed() >= LANG_INTERVAL {
+                last_lang = Instant::now();
+                let step = crash::Step::worker(crash::STEP_LANG);
+                let russian = attached.culture_id() == Some(lang::RUSSIAN_ID);
+                drop(step);
+                if russian != lang::is_russian() {
+                    lang::set_russian(russian);
+                    log!(
+                        "язык панели переключён на {}",
+                        if russian {
+                            "русский"
+                        } else {
+                            "английский"
+                        }
+                    );
+                }
             }
             if last_status.elapsed() >= STATUS_INTERVAL {
                 last_status = Instant::now();
