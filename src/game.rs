@@ -85,6 +85,11 @@ pub struct Game {
     // `QuickStackAllChests` здесь намеренно нет: раскладка идёт только
     // с игрового потока, её хэндл живёт в `input`.
     pl_add_buff: Method,
+    /// `Player.HeldItem` — предмет в выбранной ячейке хотбара. Это свойство
+    /// (`inventory[selectedItem]`), а не поле, поэтому зовём геттер.
+    /// Необязателен: не нашёлся — просто не будет проверки удочки в руке,
+    /// всё остальное работает.
+    m_held_item: Option<Method>,
 
     m_object_get_type: Method,
 
@@ -92,6 +97,9 @@ pub struct Game {
     it_stack: Field,
     it_bait: Field,
     it_buff_time: Field,
+    /// `Item.fishingPole` — сила удочки; у всего остального ноль. Ровно по
+    /// нему игра и отличает удочку от прочего инвентаря.
+    it_fishing_pole: Field,
 }
 
 impl Game {
@@ -152,6 +160,7 @@ impl Game {
             pl_control_use_item: player.field("controlUseItem")?,
             pl_buff_type: player.field("buffType")?,
             pl_add_buff: player.method("AddBuff")?,
+            m_held_item: player.method("get_HeldItem").ok(),
 
             m_object_get_type: object_type.method("GetType")?,
 
@@ -159,9 +168,16 @@ impl Game {
             it_stack: item.field("stack")?,
             it_bait: item.field("bait")?,
             it_buff_time: item.field("buffTime")?,
+            it_fishing_pole: item.field("fishingPole")?,
 
             _clr: clr,
         };
+        if game.m_held_item.is_none() {
+            crate::log!(
+                "внимание: геттер Player.HeldItem не найден — смену предмета \
+                 в хотбаре автомат не заметит"
+            );
+        }
         if verbose {
             crate::log!("шаг 6: все поля и методы разрешены");
         }
@@ -399,6 +415,23 @@ impl Game {
         let stack = self.it_stack.get(&item)?.as_int().unwrap_or(0);
         self.it_stack.set(&item, Var::int(stack - 1))?;
         Ok(())
+    }
+
+    /// Держит ли игрок удочку. Пустая ячейка хотбара и любой другой предмет
+    /// дают `false`: `Item.fishingPole` там ноль.
+    ///
+    /// Если геттера `HeldItem` не нашлось, отвечаем «удочка»: не знать —
+    /// не повод выключать рыбалку.
+    pub fn holding_rod(&self, player: &Var) -> Result<bool> {
+        let Some(held_item) = self.m_held_item.as_ref() else {
+            return Ok(true);
+        };
+        let held = held_item.invoke(player, &[])?;
+        if held.is_null() {
+            return Ok(false);
+        }
+        let power = self.it_fishing_pole.get(&held)?.as_int().unwrap_or(0);
+        Ok(power > 0)
     }
 
     pub fn version(&self) -> Option<String> {

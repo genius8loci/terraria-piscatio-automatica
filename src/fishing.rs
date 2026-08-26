@@ -190,6 +190,7 @@ impl Fishing {
     pub fn tick(&mut self, game: &Game, config: &Config) {
         self.drop_stale_click();
         self.track_session();
+        self.check_rod(game);
 
         if self.last_stock.elapsed() >= STOCK_INTERVAL {
             self.last_stock = Instant::now();
@@ -238,6 +239,34 @@ impl Fishing {
             s.stats.crates = self.crates;
             s.stats.average_bite = average;
         });
+    }
+
+    /// Удочку могли убрать из рук колесом или цифрой хотбара. Продолжать
+    /// после этого нельзя: автомат будет махать тем, что оказалось в руке,
+    /// поэтому просто выключаем режим — так же, как если бы игрок щёлкнул
+    /// переключатель сам.
+    ///
+    /// Смотрим только когда точка заброса уже запомнена: до первого ручного
+    /// заброса игрок вправе держать что угодно, рыбалка ещё не началась,
+    /// и выключаться на этом было бы вредно.
+    fn check_rod(&mut self, game: &Game) {
+        if !self.enabled() || self.aim.is_none() {
+            return;
+        }
+        let Ok(Some(player)) = game.local_player() else {
+            return;
+        };
+        match game.holding_rod(&player) {
+            Ok(true) => {}
+            Ok(false) => {
+                log!("в руке больше не удочка — авторыбалка выключена");
+                state::with(|s| {
+                    s.auto_fish = false;
+                    s.dirty = true;
+                });
+            }
+            Err(e) => log!("рыбалка: предмет в руке прочитать не удалось: {e}"),
+        }
     }
 
     /// Первый заброс делает игрок — оттуда и берём точку прицела.
