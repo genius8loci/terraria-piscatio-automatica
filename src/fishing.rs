@@ -17,6 +17,12 @@ use crate::overlay::state;
 const AFTER_PULL: u64 = 350;
 /// Пауза после заброса, пока поплавок летит.
 const AFTER_CAST: u64 = 700;
+/// Пауза после раскладки по сундукам: игре нужен кадр на саму раскладку
+/// и ещё один опрос, чтобы стало видно освободившиеся ячейки.
+const AFTER_STACK: u64 = 700;
+/// Сколько раскладок подряд терпим, прежде чем признать, что складывать
+/// некуда: сундуков рядом нет либо они полны.
+const STACK_TRIES: u32 = 3;
 /// Сколько ждать применения нажатия, прежде чем считать его потерянным.
 const CLICK_TIMEOUT: Duration = Duration::from_millis(1200);
 /// Как часто перечитывать наживку и слоты. Число свободных ячеек видно
@@ -37,6 +43,10 @@ pub struct Fishing {
     last_stock: Instant,
     last_potion: Instant,
     warned_no_detour: bool,
+    /// Сколько раскладок по сундукам подряд не освободили ни одной ячейки.
+    stack_tries: u32,
+    /// Когда отправили заявку на раскладку — по ней снимаем зависшую.
+    stack_sent: Option<Instant>,
 
     /// Когда включили рыбалку — от этого мгновения идёт время в статистике.
     /// Пока выключена, показываем последнее набежавшее, а новый запуск
@@ -68,6 +78,8 @@ impl Fishing {
             last_stock: Instant::now() - STOCK_INTERVAL,
             last_potion: Instant::now() - POTION_INTERVAL,
             warned_no_detour: false,
+            stack_tries: 0,
+            stack_sent: None,
             session_start: None,
             session_seconds: 0,
             cast_at: None,
@@ -99,6 +111,7 @@ impl Fishing {
                 self.session_seconds = 0;
                 self.aim = None;
                 self.stopped = None;
+                self.stack_tries = 0;
                 log!("рыбалка включена: жду первый заброс вручную");
             }
             (true, Some(start)) => self.session_seconds = start.elapsed().as_secs(),
@@ -351,15 +364,44 @@ impl Fishing {
             return;
         }
 
-        let quick_stack = state::with(|s| s.quick_stack).unwrap_or(false);
-        if free == 0 && quick_stack {
-            if let Ok(Some(player)) = game.local_player() {
-                match game.quick_stack_to_nearby_chests(&player) {
-                    Ok(()) => log!("инвентарь полон — разложил по ближайшим сундукам"),
-                    Err(e) => log!("разложить по сундукам не удалось: {e}"),
-                }
+        // Забрасывать в полный инвентарь бессмысленно: улов просто пропадёт.
+        if free == 0 {
+            let quick_stack = state::with(|s| s.quick_stack).unwrap_or(false);
+            if !quick_stack {
+                self.stopped = Some("инвентарь полон".to_string());
+                log!("рыбалка остановлена: инвентарь полон, раскладка по сундукам выключена");
+                return;
             }
+            // Раскладку делает игровой поток, здесь только заявка. Пока она
+            // не исполнена — ждём, ячейки освободятся не сию секунду.
+            if input::quick_stack_pending() {
+                // Не исполнилась вовсе — значит, детур не сработал. Снимаем,
+                // иначе автомат остался бы ждать её навсегда.
+                if self
+                    .stack_sent
+                    .is_some_and(|at| at.elapsed() > CLICK_TIMEOUT)
+                {
+                    input::cancel_quick_stack();
+                    self.stack_sent = None;
+                    log!("сундуки: раскладка не исполнилась за {CLICK_TIMEOUT:?}, снял заявку");
+                }
+                return;
+            }
+            self.stack_sent = None;
+            self.stack_tries += 1;
+            if self.stack_tries > STACK_TRIES {
+                self.stopped = Some("инвентарь полон, сундуков рядом нет".to_string());
+                log!(
+                    "рыбалка остановлена: {STACK_TRIES} раскладок подряд не освободили ни одной ячейки"
+                );
+                return;
+            }
+            input::request_quick_stack();
+            self.stack_sent = Some(Instant::now());
+            self.next_action = Instant::now() + Duration::from_millis(AFTER_STACK);
+            return;
         }
+        self.stack_tries = 0;
 
         if !self.click(Some(aim)) {
             return;

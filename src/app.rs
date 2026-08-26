@@ -176,11 +176,12 @@ pub fn run(dll_dir: PathBuf) {
             if last_status.elapsed() >= STATUS_INTERVAL {
                 last_status = Instant::now();
                 log!(
-                    "статус: {} | детур сработал {} раз, кликов {}, сбоев {}, панель из DrawCursor {} раз",
+                    "статус: {} | детур сработал {} раз, кликов {}, сбоев {}, раскладок {}, панель из DrawCursor {} раз",
                     fishing.status(),
                     input::FIRED.load(Ordering::Relaxed),
                     input::CLICKS.load(Ordering::Relaxed),
                     input::FAILURES.load(Ordering::Relaxed),
+                    input::STACKS.load(Ordering::Relaxed),
                     overlay::CURSOR_DRAWS.load(Ordering::Relaxed)
                 );
             }

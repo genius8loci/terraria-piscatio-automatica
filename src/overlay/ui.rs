@@ -53,12 +53,44 @@ const ARROW_W: f32 = 64.0;
 const ARROW_H: f32 = 26.0;
 /// Переключатель рисуется в натуральную величину текстуры: 14 пикселей.
 const TOGGLE: f32 = 14.0;
+
+/// Пара картинок переключателя и место, которое она занимает при масштабе 1.
+#[derive(Clone, Copy)]
+struct Knob {
+    on: i32,
+    off: i32,
+    w: f32,
+    h: f32,
+}
+
+/// Переключатель по умолчанию — звёздочка ранга из бестиария.
+const STAR: Knob = Knob {
+    on: icons::TOGGLE_ON,
+    off: icons::TOGGLE_OFF,
+    w: TOGGLE,
+    h: TOGGLE,
+};
+/// Строка про сундуки: та же кнопка, что в инвентаре игры. Картинка 32x30,
+/// поэтому и здесь не квадрат — иначе сундук сплющило бы.
+const CHEST: Knob = Knob {
+    on: icons::CHEST_ON,
+    off: icons::CHEST_OFF,
+    w: 24.0,
+    h: 22.5,
+};
+/// Самая широкая картинка переключателя — по ней считается место,
+/// которое надо оставить справа от подписи.
+const KNOB_MAX: f32 = CHEST.w;
 /// Сторона уголка на кнопке сворачивания.
 const CHEVRON: f32 = 16.0;
 /// Подсказка в пустой строке поиска — как у игры в её собственных полях.
 const SEARCH_HINT: &str = "Имя:";
 /// Просвет между кнопкой поиска и полем: у игры ровно три пикселя.
 const SEARCH_GAP: f32 = 3.0;
+/// Высота строки поиска. У игры `UIWrappedSearchBar.Height = 24`, и она
+/// заметно ниже наших строк: там одна короткая надпись, а не подпись
+/// с переключателем.
+const SEARCH_H: f32 = 24.0;
 /// Полпериода мигания курсора ввода, в кадрах.
 const BLINK: u32 = 30;
 /// Поле от нижнего края экрана, ниже которого окно фильтра не растёт.
@@ -263,16 +295,12 @@ impl<'a, 'b> Layout<'a, 'b> {
         }
     }
 
-    /// Переключатель — звёздочка ранга из бестиария: золотая включено,
-    /// тусклая выключено. Цвет у обеих свой, поэтому красим их белым;
-    /// наведение показываем золотой рамкой, как игра.
-    fn toggle(&mut self, r: Rect, on: bool) -> bool {
+    /// Переключатель: две картинки игры, подсвеченная и обычная. Цвет
+    /// у обеих свой, поэтому красим их белым; наведение показываем
+    /// золотой рамкой, как игра.
+    fn toggle(&mut self, r: Rect, knob: Knob, on: bool) -> bool {
         let clicked = self.hit(r);
-        let id = if on {
-            icons::TOGGLE_ON
-        } else {
-            icons::TOGGLE_OFF
-        };
+        let id = if on { knob.on } else { knob.off };
         self.painter.stretch(id, r.x, r.y, r.w, r.h, colors::PLAIN);
         if self.hovered(r) {
             let pad = (2.0 * self.scale).round();
@@ -291,7 +319,12 @@ impl<'a, 'b> Layout<'a, 'b> {
 
     /// Переключатель, прижатый к правому краю строки, вместе с подписью слева.
     fn switch_row(&mut self, r: Rect, label: &str, on: bool) -> bool {
-        self.switch_row_note(r, label, "", colors::TEXT, on)
+        self.switch_row_note(r, label, "", colors::TEXT, STAR, on)
+    }
+
+    /// То же, но своей картинкой переключателя.
+    fn switch_row_knob(&mut self, r: Rect, label: &str, knob: Knob, on: bool) -> bool {
+        self.switch_row_note(r, label, "", colors::TEXT, knob, on)
     }
 
     /// То же, но с приписком своего цвета сразу за подписью.
@@ -301,6 +334,7 @@ impl<'a, 'b> Layout<'a, 'b> {
         label: &str,
         note: &str,
         note_color: u32,
+        knob: Knob,
         on: bool,
     ) -> bool {
         self.row_bg(r);
@@ -311,14 +345,15 @@ impl<'a, 'b> Layout<'a, 'b> {
             let after = r.x + pad + self.painter.measure(label);
             self.painter.text_left(after, r.y, r.h, note, note_color);
         }
-        let size = (TOGGLE * self.scale).round();
-        let knob = Rect {
-            x: r.x + r.w - size - pad,
-            y: (r.y + (r.h - size) * 0.5).round(),
-            w: size,
-            h: size,
+        let w = (knob.w * self.scale).round();
+        let h = (knob.h * self.scale).round();
+        let place = Rect {
+            x: r.x + r.w - w - pad,
+            y: (r.y + (r.h - h) * 0.5).round(),
+            w,
+            h,
         };
-        self.toggle(knob, on)
+        self.toggle(place, knob, on)
     }
 
     /// Строка «подпись — значение».
@@ -403,7 +438,7 @@ pub fn build(
     // `Cargo.toml`, чей размер заранее неизвестен. Шире экрана при этом
     // панель не становится.
     let pad2 = (PAD * 2.0 * scale).round();
-    let toggle_gap = (TOGGLE + PAD) * scale;
+    let toggle_gap = (KNOB_MAX + PAD) * scale;
     let longest = LABELS
         .iter()
         .map(|label| layout.painter.measure(label) + toggle_gap)
@@ -524,7 +559,7 @@ pub fn build(
         ),
         (true, Some((ax, ay))) => (format!(" (зафиксировано {ax}:{ay})"), colors::RARE_ORANGE),
     };
-    if layout.switch_row_note(r, "Авторыбалка", &note, note_color, auto_fish) {
+    if layout.switch_row_note(r, "Авторыбалка", &note, note_color, STAR, auto_fish) {
         state::with(|s| {
             s.auto_fish = !s.auto_fish;
             s.dirty = true;
@@ -532,7 +567,7 @@ pub fn build(
     }
 
     let r = next_row(&mut cursor);
-    if layout.switch_row(r, "Сундуки разложить при заполнении", quick_stack)
+    if layout.switch_row_knob(r, "Сундуки разложить при заполнении", CHEST, quick_stack)
     {
         state::with(|s| {
             s.quick_stack = !s.quick_stack;
@@ -728,11 +763,12 @@ fn filter_window(
     let pad = (PAD * scale).round();
     let gap = (GAP * scale).round();
     let row_h = (ROW_H * scale).round();
+    let search_h = (SEARCH_H * scale).round();
     let margin = (SCREEN_MARGIN * scale).round();
 
     // Сколько строк вообще можно показать, чтобы окно влезло в экран.
-    // Шапка: заголовок, строка режима и строка поиска.
-    let head_h = pad + row_h * 3.0 + gap * 2.0;
+    // Шапка: заголовок, строка режима и строка поиска — последняя ниже.
+    let head_h = pad + row_h * 2.0 + search_h + gap * 2.0;
     let available = (screen_h - y - margin - head_h - pad).max(cell);
     let fits = ((available + gap) / (cell + gap)).floor().max(1.0) as usize;
 
@@ -804,10 +840,10 @@ fn filter_window(
         x: inner_x,
         y: cursor,
         w: inner_w,
-        h: row_h,
+        h: search_h,
     };
     search_field(layout, ui, search, scale);
-    cursor += row_h + gap;
+    cursor += search_h + gap;
 
     // Сетку центрируем: остаток от деления уходит в поля.
     let used = cols as f32 * (cell + gap) - gap;
@@ -890,14 +926,26 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
     if layout.hit(button) {
         ui.search_focus = true;
     }
-    if over_button || ui.search_focus {
+    // Рамка только под курсором: это `SetHoverImage`, а не отметка фокуса.
+    if over_button {
         layout.frame(button, icons::FRAME_SMALL);
     }
 
     // --- само поле ---------------------------------------------------------
-    // Заливка и обводка одного цвета — так игра рисует `_searchBoxPanel`:
-    // `BackgroundColor = BorderColor = new Color(35, 40, 83)`.
+    // Попадание считаем до отрисовки: от фокуса зависит цвет обводки.
     let icon = (field.h - pad * 2.0).round();
+    if layout.hit(field) {
+        ui.search_focus = true;
+    }
+    // Заливка и обводка одного цвета — так игра рисует `_searchBoxPanel`.
+    // Фокус она показывает не картинкой поверх, а перекраской этой же
+    // обводки в `Main.OurFavoriteColor`; своя рамка ложилась мимо, потому
+    // что скруглена мельче, чем панель под ней.
+    let border = if ui.search_focus {
+        colors::FOCUS
+    } else {
+        colors::SEARCH_FIELD
+    };
     layout.painter.nine_slice(
         icons::PANEL,
         field.x,
@@ -914,15 +962,8 @@ fn search_field(layout: &mut Layout, ui: &mut UiState, r: Rect, scale: f32) {
         field.w,
         field.h,
         icons::PANEL_INSET,
-        colors::SEARCH_FIELD,
+        border,
     );
-    if layout.input.clicked && layout.hovered(field) {
-        ui.search_focus = true;
-    }
-    let _ = layout.hit(field);
-    if ui.search_focus || layout.hovered(field) {
-        layout.frame(field, icons::FRAME_WIDE);
-    }
 
     // Крестик стирает набранное; появляется, только когда есть что стирать.
     let mut text_w = field.w - pad * 2.0;

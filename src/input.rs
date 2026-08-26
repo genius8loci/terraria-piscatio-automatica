@@ -10,7 +10,7 @@
 
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 
 use windows::core::IUnknown;
 
@@ -25,6 +25,9 @@ pub const CMD_PRESS: u8 = 1;
 const CMD_RELEASE: u8 = 2;
 
 pub static COMMAND: AtomicU8 = AtomicU8::new(CMD_NONE);
+/// Заявка «разложить по ближайшим сундукам». Отдельно от `COMMAND`:
+/// раскладка не занимает кадров и с нажатием не конфликтует.
+static QUICK_STACK: AtomicBool = AtomicBool::new(false);
 /// Экранные координаты прицела; -1 — не трогать курсор.
 pub static AIM_X: AtomicI32 = AtomicI32::new(-1);
 pub static AIM_Y: AtomicI32 = AtomicI32::new(-1);
@@ -33,6 +36,8 @@ pub static AIM_Y: AtomicI32 = AtomicI32::new(-1);
 pub static FIRED: AtomicU32 = AtomicU32::new(0);
 pub static CLICKS: AtomicU32 = AtomicU32::new(0);
 pub static FAILURES: AtomicU32 = AtomicU32::new(0);
+/// Сколько раз раскладка по сундукам прошла.
+pub static STACKS: AtomicU32 = AtomicU32::new(0);
 
 /// Кадр, в котором команда уже применялась.
 static LAST_FRAME: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -56,6 +61,9 @@ struct Handles {
     wheel: Option<Field>,
     control_use_item: Field,
     mouse_interface: Field,
+    /// `Player.QuickStackAllChests()` — та самая кнопка из инвентаря.
+    /// Не нашлась — просто не будет раскладки.
+    quick_stack: Option<Method>,
     /// Всё, что нужно для подсказки предмета. Целиком необязательно:
     /// не нашлось — просто не будет подсказок.
     tooltip: Option<TooltipApi>,
@@ -125,7 +133,8 @@ pub fn on_item_check(_this: *mut c_void) {
     FIRED.fetch_add(1, Ordering::Relaxed);
 
     let command = COMMAND.load(Ordering::Acquire);
-    if command == CMD_NONE {
+    let stack = QUICK_STACK.load(Ordering::Acquire);
+    if command == CMD_NONE && !stack {
         // Быстрый путь: в простое ни одного обращения к CLR.
         return;
     }
@@ -142,9 +151,15 @@ pub fn on_item_check(_this: *mut c_void) {
     let Some(handles) = handles() else {
         FAILURES.fetch_add(1, Ordering::Relaxed);
         COMMAND.store(CMD_NONE, Ordering::Release);
+        QUICK_STACK.store(false, Ordering::Release);
         crate::log!("ввод: поднять хэндлы не удалось, команда отменена");
         return;
     };
+
+    if stack {
+        QUICK_STACK.store(false, Ordering::Release);
+        quick_stack(handles);
+    }
 
     match command {
         CMD_PRESS => {
@@ -167,6 +182,33 @@ pub fn on_item_check(_this: *mut c_void) {
             CLICKS.fetch_add(1, Ordering::Relaxed);
         }
         _ => COMMAND.store(CMD_NONE, Ordering::Release),
+    }
+}
+
+/// Разложить по ближайшим сундукам руками самой игры.
+///
+/// Звать можно только отсюда, с игрового потока. `QuickStacking` ведёт весь
+/// разбор в общих статических буферах — `NearbyChests._scratch`,
+/// `inventoryItemsScratch`, пул `DestinationHelper` — и переставляет предметы
+/// прямо в `player.inventory` и в `Chest.item`. Ни одного замка там нет:
+/// сама игра зовёт это из `Main.DrawInventory`, то есть строго из своего
+/// кадра. С рабочего потока вызов читал наполовину собранное состояние и
+/// падал по нулевому указателю в JIT-коде (0xC0000005 в логе), а рефлексия
+/// показывала это как «Адресат вызова создал исключение».
+fn quick_stack(handles: &Handles) {
+    let Some(method) = handles.quick_stack.as_ref() else {
+        crate::log!("сундуки: метода QuickStackAllChests нет, раскладка недоступна");
+        return;
+    };
+    let Some(player) = handles.local_player() else {
+        return;
+    };
+    match method.invoke(&player, &[]) {
+        Ok(_) => {
+            STACKS.fetch_add(1, Ordering::Relaxed);
+            crate::log!("инвентарь полон — разложил по ближайшим сундукам");
+        }
+        Err(e) => crate::log!("разложить по сундукам не удалось: {e}"),
     }
 }
 
@@ -224,6 +266,7 @@ fn attach() -> Option<Handles> {
             .and_then(|t| t.field("ScrollWheelDelta").ok()),
         control_use_item: player.field("controlUseItem").ok()?,
         mouse_interface: player.field("mouseInterface").ok()?,
+        quick_stack: player.method("QuickStackAllChests").ok(),
         tooltip: tooltip_api(&assembly, &main),
         text: text_api(&main, input.as_ref()),
         _clr: clr,
@@ -269,6 +312,23 @@ pub fn request_click(aim: Option<(i32, i32)>) {
 
 pub fn busy() -> bool {
     COMMAND.load(Ordering::Acquire) != CMD_NONE
+}
+
+/// Поставить в очередь раскладку по ближайшим сундукам. Исполнит её
+/// игровой поток в ближайшем кадре, см. `quick_stack`.
+pub fn request_quick_stack() {
+    QUICK_STACK.store(true, Ordering::Release);
+}
+
+/// Заявка ещё не исполнена.
+pub fn quick_stack_pending() -> bool {
+    QUICK_STACK.load(Ordering::Acquire)
+}
+
+/// Снять зависшую заявку: без детура исполнять её некому, а автомат
+/// иначе будет ждать её вечно.
+pub fn cancel_quick_stack() {
+    QUICK_STACK.store(false, Ordering::Release);
 }
 
 /// Снимает зависшую команду: если детур не сработал, `busy()` иначе

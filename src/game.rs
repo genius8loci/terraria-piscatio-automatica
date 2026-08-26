@@ -82,7 +82,8 @@ pub struct Game {
     pl_inventory: Field,
     pl_control_use_item: Field,
     pl_buff_type: Field,
-    pl_quick_stack: Method,
+    // `QuickStackAllChests` здесь намеренно нет: раскладка идёт только
+    // с игрового потока, её хэндл живёт в `input`.
     pl_add_buff: Method,
 
     m_object_get_type: Method,
@@ -150,7 +151,6 @@ impl Game {
             pl_inventory: player.field("inventory")?,
             pl_control_use_item: player.field("controlUseItem")?,
             pl_buff_type: player.field("buffType")?,
-            pl_quick_stack: player.method("QuickStackAllChests")?,
             pl_add_buff: player.method("AddBuff")?,
 
             m_object_get_type: object_type.method("GetType")?,
@@ -501,13 +501,6 @@ impl Game {
             }
         }
         Ok(free)
-    }
-
-    /// Эмулирует игровую кнопку «разложить по ближайшим сундукам».
-    #[allow(dead_code)]
-    pub fn quick_stack_to_nearby_chests(&self, player: &Var) -> Result<()> {
-        self.pl_quick_stack.invoke(player, &[])?;
-        Ok(())
     }
 
     /// Жать «использовать предмет» будем из детура `Player.ItemCheck`,

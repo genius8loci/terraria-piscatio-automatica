@@ -74,6 +74,10 @@ pub mod colors {
     /// Поле строки поиска: у игры это `UIPanel` с заливкой и обводкой
     /// одного цвета, `new Color(35, 40, 83)` — см. `UIWrappedSearchBar`.
     pub const SEARCH_FIELD: u32 = 0xFF_232853;
+    /// Фокус ввода. Игра не кладёт поверх поля картинку с рамкой, а просто
+    /// перекрашивает его обводку: `_searchBoxPanel.BorderColor =
+    /// Main.OurFavoriteColor` — это `new Color(255, 231, 69)`.
+    pub const FOCUS: u32 = 0xFF_FFE745;
     /// «Как есть»: текстура уже нужного цвета.
     pub const PLAIN: u32 = 0xFF_FFFFFF;
 

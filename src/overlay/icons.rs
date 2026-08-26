@@ -54,10 +54,15 @@ pub const SEARCH_CANCEL: i32 = -16;
 /// пикселям, как рисует свою графику игра.
 pub const CHEVRON_UP: i32 = -17;
 pub const CHEVRON_DOWN: i32 = -18;
-/// Золотые рамки наведения и фокуса: квадратная под кнопку и широкая
-/// под строку. Обе с прозрачной серединой, так что кладутся поверх.
+/// Золотая рамка наведения под кнопку поиска. Середина прозрачная,
+/// так что кладётся поверх. Широкой рамки под строку у игры нет: фокус
+/// поля она показывает не картинкой, а цветом обводки, см. `search_field`.
 pub const FRAME_SMALL: i32 = -19;
-pub const FRAME_WIDE: i32 = -20;
+/// Сундук со стрелками — кнопка «разложить по ближайшим сундукам» из
+/// инвентаря игры. Ровно так игра и различает состояния: `ChestStack_0`
+/// обычный, `ChestStack_1` подсвечен (`Main.DrawInventory`, `num80`).
+pub const CHEST_OFF: i32 = -21;
+pub const CHEST_ON: i32 = -22;
 
 /// Ширина рамки при девятичастной нарезке, в пикселях исходной текстуры.
 /// Для панели это раскладка самой игры: 12 + 4 + 12 = 28.
@@ -79,9 +84,10 @@ const UI_ASSETS: &[(i32, &str, Option<[u32; 4]>)] = &[
     (SEARCH_CANCEL, "UI/SearchCancel", None),
     (TOGGLE_OFF, "UI/Bestiary/Icon_Rank_Dim", None),
     (TOGGLE_ON, "UI/Bestiary/Icon_Rank_Light", None),
-    // Золотые рамки из бестиария: ими игра показывает наведение и фокус.
+    (CHEST_OFF, "UI/ChestStack_0", None),
+    (CHEST_ON, "UI/ChestStack_1", None),
+    // Золотая рамка из бестиария: ей игра показывает наведение на кнопку.
     (FRAME_SMALL, "UI/Bestiary/Button_Search_Border", None),
-    (FRAME_WIDE, "UI/Bestiary/Button_Wide_Border", None),
     (BAR_TRACK, "UI/Scrollbar", None),
     (BAR_HANDLE, "UI/ScrollbarInner", None),
 ];
