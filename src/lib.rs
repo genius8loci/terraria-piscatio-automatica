@@ -31,10 +31,14 @@ const DLL_PROCESS_DETACH: u32 = 0;
 
 pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub(crate) static UNLOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
-pub(crate) static SHOW_UI: AtomicBool = AtomicBool::new(false);
-/// Счётчик кадров: наращивается в хуке Present, служит границей кадра
-/// для детура `Player.ItemCheck` (на сервере он вызывается по разу
-/// на каждого игрока, и нажатие с отпусканием слиплись бы в один кадр).
+/// Счётчик **нарисованных** кадров: наращивается в хуке Present. По нему
+/// моргает курсор ввода и крутится анимация в панели.
+///
+/// Границей для детура `Player.ItemCheck` он больше не служит: свёрнутая
+/// игра обновляется, но не рисует, и счётчик там замирает — на нём при
+/// свёрнутом окне не проходило ни одно нажатие. Тики считает `input::tick_now`
+/// по `Main.GameUpdateCount`, а этот остаётся откатом на случай, если
+/// счётчика тиков в сборке игры не нашлось.
 pub(crate) static FRAME: AtomicU32 = AtomicU32::new(0);
 
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -87,6 +91,8 @@ fn start() {
         detour::uninstall();
         detour::uninstall_cursor();
         overlay::uninstall();
+        // Разрешение системного таймера поднимала выдержка тиков — вернём.
+        input::shutdown();
         crash::uninstall();
         std::thread::sleep(std::time::Duration::from_millis(250));
 

@@ -13,7 +13,9 @@ use super::xnb;
 /// Ширина атласа; высота считается по факту укладки.
 const ATLAS_WIDTH: u32 = 1024;
 const GAP: u32 = 2;
-/// Иконки крупнее просто не влезут в ячейку сетки.
+/// Ориентир размера иконки в ячейке сетки. В атлас берём вчетверо шире:
+/// у части предметов картинка заметно крупнее ячейки, и ужимает её уже
+/// отрисовка (`Painter::icon`), а вот ленты в сотни пикселей — точно мусор.
 const MAX_ICON: u32 = 48;
 
 // ---------------------------------------------------------------------------
@@ -154,13 +156,21 @@ impl IconAtlas {
 /// У каждого предмета — число кадров анимации: у неподвижных единица,
 /// у остальных в файле лежит лента кадров сверху вниз, и берём верхний.
 /// Отсутствующие или слишком большие иконки пропускаются молча.
-pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
+///
+/// `content` — папка `Content/Images` игры; `None` означает, что до неё
+/// не добрались. Атлас в этом случае всё равно собирается: белый квадратик
+/// и уголки рисуем сами, а без них панель не нарисовалась бы вовсе —
+/// через белый квадратик идут все её заливки.
+pub fn build(content: Option<&Path>, items: &[(i32, u32)]) -> Option<IconAtlas> {
     let mut loaded: Vec<(i32, xnb::Image)> = Vec::with_capacity(items.len() + UI_ASSETS.len() + 1);
 
     loaded.push((WHITE, white_block()));
     loaded.push((CHEVRON_UP, chevron_block(true)));
     loaded.push((CHEVRON_DOWN, chevron_block(false)));
     for (id, name, cut) in UI_ASSETS {
+        let Some(content) = content else {
+            break;
+        };
         let path = content.join(format!("{name}.xnb"));
         let Some(image) = xnb::load_texture(&path) else {
             crate::log!("оверлей: {} не прочитан", path.display());
@@ -208,6 +218,9 @@ pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
     }
 
     for &(id, frames) in items {
+        let Some(content) = content else {
+            break;
+        };
         let path = content.join(format!("Item_{id}.xnb"));
         let Some(image) = xnb::load_texture(&path) else {
             continue;
@@ -223,6 +236,24 @@ pub fn build(content: &Path, items: &[(i32, u32)]) -> Option<IconAtlas> {
             loaded.push((id, frame));
         }
     }
+    if loaded.is_empty() {
+        return None;
+    }
+
+    // В полку шириной с атлас картинка обязана помещаться целиком: иначе
+    // строка копирования уедет за край и либо испортит соседний ряд,
+    // либо выйдет за границу буфера. Такую просто не берём.
+    loaded.retain(|(id, image)| {
+        let fits = image.width + GAP * 2 <= ATLAS_WIDTH && image.width > 0 && image.height > 0;
+        if !fits {
+            crate::log!(
+                "оверлей: картинка {id} размером {}x{} в атлас не влезает, пропущена",
+                image.width,
+                image.height
+            );
+        }
+        fits
+    });
     if loaded.is_empty() {
         return None;
     }

@@ -9,11 +9,14 @@ use crate::clr::{
     BINDING_INSTANCE, BINDING_NON_PUBLIC, Clr, Field, Method, Type, Var, array_get, array_len, err,
 };
 
-/// Размер `Main.projectile` в 1.4.5.6.
+/// Запасной размер `Main.projectile`: в 1.4.5.8 массив на 1001 снаряд.
+/// Настоящую длину спрашиваем у самого массива, это лишь откат на случай,
+/// если она почему-то не прочиталась.
 const MAX_PROJECTILES: i32 = 1001;
 /// Размер `Player.inventory` — 59; слоты 0..49 это основная сетка.
 const INVENTORY_MAIN_SLOTS: i32 = 50;
-/// `Player.maxBuffs` в 1.4.5.8.
+/// Запасное значение `Player.maxBuffs` (44 в 1.4.5.8): настоящую длину
+/// берём у самого массива баффов.
 const MAX_BUFFS: i32 = 44;
 
 /// Зелья рыбалки: id предмета и id баффа (из ItemID / BuffID).
@@ -54,7 +57,13 @@ pub struct Game {
     f_my_player: Field,
     f_player: Field,
     f_projectile: Field,
-    f_throttle: Field,
+    /// `Main.ThrottleWhenInactive`. Необязательно: без него просто не станем
+    /// трогать сон свёрнутой игры — своя выдержка тиков есть в `input`.
+    f_throttle: Option<Field>,
+    /// `Main.drawingPlayerChat` — открыт ли чат игры. По нему хоткеи молчат:
+    /// иначе стрелки листали бы историю чата и заодно дёргали панель,
+    /// а Delete при правке строки выгружал бы DLL.
+    f_chat_open: Option<Field>,
     f_version: Option<Field>,
     f_mouse_x: Field,
     f_mouse_y: Field,
@@ -85,10 +94,9 @@ pub struct Game {
     pr_wet: Option<Field>,
 
     pl_inventory: Field,
-    pl_control_use_item: Field,
     pl_buff_type: Field,
-    // `QuickStackAllChests` здесь намеренно нет: раскладка идёт только
-    // с игрового потока, её хэндл живёт в `input`.
+    // `QuickStackAllChests` и `controlUseItem` здесь намеренно нет: и то
+    // и другое трогается только с игрового потока, их хэндлы живут в `input`.
     pl_add_buff: Method,
     /// `Player.HeldItem` — предмет в выбранной ячейке хотбара. Это свойство
     /// (`inventory[selectedItem]`), а не поле, поэтому зовём геттер.
@@ -160,7 +168,8 @@ impl Game {
             f_my_player: main.field("myPlayer")?,
             f_player: main.field("player")?,
             f_projectile: main.field("projectile")?,
-            f_throttle: main.field("ThrottleWhenInactive")?,
+            f_throttle: main.field("ThrottleWhenInactive").ok(),
+            f_chat_open: main.field("drawingPlayerChat").ok(),
             f_version: main.field("versionNumber").ok(),
 
             pr_active: projectile.field("active")?,
@@ -171,7 +180,6 @@ impl Game {
             pr_wet: projectile.field("wet").ok(),
 
             pl_inventory: player.field("inventory")?,
-            pl_control_use_item: player.field("controlUseItem")?,
             pl_buff_type: player.field("buffType")?,
             pl_add_buff: player.method("AddBuff")?,
             m_held_item: player.method("get_HeldItem").ok(),
@@ -229,14 +237,37 @@ impl Game {
         Ok(Some(player))
     }
 
-    /// Снимает троттлинг при потере фокуса: без этого свёрнутая игра
-    /// спит по 20 мс на кадр и рыбалка идёт заметно медленнее.
+    /// Снимает сон игры при потере фокуса.
+    ///
+    /// Сам по себе он безобиден, но у свёрнутой игры это **единственный**
+    /// ограничитель: кадры не рисуются, значит и вертикальной синхронизации
+    /// в `Present` нет, а при `FrameSkipMode != 0` шаг цикла не фиксирован.
+    /// Снятый сон разгоняет мир в десятки раз, поэтому вместе с этим вызовом
+    /// обязана работать своя выдержка тиков — см. `input::pace_inactive`.
     pub fn set_inactive_throttle(&self, enabled: bool) -> Result<()> {
-        self.f_throttle.set_static(Var::boolean(enabled))
+        let field = self
+            .f_throttle
+            .as_ref()
+            .ok_or_else(|| err("поля Main.ThrottleWhenInactive нет"))?;
+        field.set_static(Var::boolean(enabled))
     }
 
     pub fn inactive_throttle(&self) -> Result<bool> {
-        Ok(self.f_throttle.get_static()?.as_bool().unwrap_or(true))
+        let field = self
+            .f_throttle
+            .as_ref()
+            .ok_or_else(|| err("поля Main.ThrottleWhenInactive нет"))?;
+        Ok(field.get_static()?.as_bool().unwrap_or(true))
+    }
+
+    /// Открыт ли чат игры. Пока открыт, клавиши принадлежат ему, а не нам.
+    /// Поля нет — считаем, что закрыт: это прежнее поведение.
+    pub fn chat_open(&self) -> bool {
+        self.f_chat_open
+            .as_ref()
+            .and_then(|f| f.get_static().ok())
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 
     /// Экранные координаты курсора игры.
@@ -383,6 +414,10 @@ impl Game {
 
         let count = array_len(&array)?;
         let mut items: Vec<i32> = Vec::new();
+        // Поле кэшируем, но не считаем его годным навсегда: правила бывают
+        // разных типов, и у соседнего `PossibleItems` может лежать в другом
+        // месте. Сорвалось чтение — перерешаем поле по типу этого правила,
+        // а не роняем весь список.
         let mut possible: Option<Field> = None;
 
         for i in 0..count {
@@ -390,19 +425,24 @@ impl Game {
             if rule.is_null() {
                 continue;
             }
-            if possible.is_none() {
-                possible = Some(self.type_of(&rule)?.field("PossibleItems")?);
+            let mut ids = possible.as_ref().and_then(|f| f.get(&rule).ok());
+            if ids.is_none() {
+                let Ok(field) = self.type_of(&rule).and_then(|t| t.field("PossibleItems")) else {
+                    continue;
+                };
+                ids = field.get(&rule).ok();
+                possible = Some(field);
             }
-            let Some(field) = possible.as_ref() else {
+            let Some(ids) = ids else {
                 continue;
             };
-            let ids = field.get(&rule)?;
             if ids.is_null() {
                 continue;
             }
             let n = array_len(&ids).unwrap_or(0);
             for j in 0..n {
-                if let Some(id) = array_get(&ids, j)?.as_int()
+                if let Ok(slot) = array_get(&ids, j)
+                    && let Some(id) = slot.as_int()
                     && id > 0
                     && !items.contains(&id)
                 {
@@ -416,7 +456,8 @@ impl Game {
 
     pub fn has_buff(&self, player: &Var, buff: i32) -> Result<bool> {
         let buffs = self.pl_buff_type.get(player)?;
-        for i in 0..MAX_BUFFS {
+        let count = array_len(&buffs).unwrap_or(MAX_BUFFS);
+        for i in 0..count {
             if array_get(&buffs, i)?.as_int().unwrap_or(0) == buff {
                 return Ok(true);
             }
@@ -459,7 +500,15 @@ impl Game {
             &[Var::int(buff), Var::int(duration), Var::boolean(false)],
         )?;
         let stack = self.it_stack.get(&item)?.as_int().unwrap_or(0);
-        self.it_stack.set(&item, Var::int(stack - 1))?;
+        let left = stack - 1;
+        self.it_stack.set(&item, Var::int(left))?;
+        // Пустая ячейка у игры — это `type == 0`, а не «стак ноль»: последнее
+        // она сама доводит через `Item.TurnToAir()`. Без обнуления типа
+        // в инвентаре оставался бы призрак зелья, который рисуется, но
+        // не берётся.
+        if left <= 0 {
+            self.it_type.set(&item, Var::int(0))?;
+        }
         Ok(())
     }
 
@@ -509,15 +558,16 @@ impl Game {
             return Ok(None);
         }
         let projectiles = self.f_projectile.get_static()?;
+        let count = array_len(&projectiles).unwrap_or(MAX_PROJECTILES);
 
         if let Some(i) = hint
-            && (0..MAX_PROJECTILES).contains(&i)
+            && (0..count).contains(&i)
             && let Some(bobber) = self.read_bobber(&projectiles, i, me)?
         {
             return Ok(Some(bobber));
         }
 
-        for i in 0..MAX_PROJECTILES {
+        for i in 0..count {
             if Some(i) == hint {
                 continue;
             }
@@ -529,38 +579,36 @@ impl Game {
     }
 
     fn read_bobber(&self, projectiles: &Var, i: i32, me: i32) -> Result<Option<Bobber>> {
-        {
-            let projectile = array_get(projectiles, i)?;
-            if projectile.is_null() {
-                return Ok(None);
-            }
-            if !self.pr_active.get(&projectile)?.as_bool().unwrap_or(false) {
-                return Ok(None);
-            }
-            if !self.pr_bobber.get(&projectile)?.as_bool().unwrap_or(false) {
-                return Ok(None);
-            }
-            if self.pr_owner.get(&projectile)?.as_int().unwrap_or(-1) != me {
-                return Ok(None);
-            }
-
-            let ai = self.pr_ai.get(&projectile)?;
-            let local_ai = self.pr_local_ai.get(&projectile)?;
-
-            Ok(Some(Bobber {
-                index: i,
-                ai1: array_get(&ai, 1)?.as_float().unwrap_or(0.0),
-                local_ai1: array_get(&local_ai, 1)?.as_float().unwrap_or(0.0),
-                wet: self
-                    .pr_wet
-                    .as_ref()
-                    .and_then(|f| f.get(&projectile).ok())
-                    .and_then(|v| v.as_bool())
-                    // Поля нет — считаем, что уже долетел: так панель ведёт
-                    // себя как раньше, а не врёт про вечный полёт.
-                    .unwrap_or(true),
-            }))
+        let projectile = array_get(projectiles, i)?;
+        if projectile.is_null() {
+            return Ok(None);
         }
+        if !self.pr_active.get(&projectile)?.as_bool().unwrap_or(false) {
+            return Ok(None);
+        }
+        if !self.pr_bobber.get(&projectile)?.as_bool().unwrap_or(false) {
+            return Ok(None);
+        }
+        if self.pr_owner.get(&projectile)?.as_int().unwrap_or(-1) != me {
+            return Ok(None);
+        }
+
+        let ai = self.pr_ai.get(&projectile)?;
+        let local_ai = self.pr_local_ai.get(&projectile)?;
+
+        Ok(Some(Bobber {
+            index: i,
+            ai1: array_get(&ai, 1)?.as_float().unwrap_or(0.0),
+            local_ai1: array_get(&local_ai, 1)?.as_float().unwrap_or(0.0),
+            wet: self
+                .pr_wet
+                .as_ref()
+                .and_then(|f| f.get(&projectile).ok())
+                .and_then(|v| v.as_bool())
+                // Поля нет — считаем, что уже долетел: так панель ведёт
+                // себя как раньше, а не врёт про вечный полёт.
+                .unwrap_or(true),
+        }))
     }
 
     /// Суммарный стак наживки в инвентаре. Логика повторяет
@@ -601,12 +649,5 @@ impl Game {
             }
         }
         Ok(free)
-    }
-
-    /// Жать «использовать предмет» будем из детура `Player.ItemCheck`,
-    /// но поле разрешаем уже сейчас.
-    #[allow(dead_code)]
-    pub fn set_control_use_item(&self, player: &Var, pressed: bool) -> Result<()> {
-        self.pl_control_use_item.set(player, Var::boolean(pressed))
     }
 }

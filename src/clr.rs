@@ -28,9 +28,9 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::System::Variant::{
-    VARENUM, VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_ARRAY, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_I4,
-    VT_INT, VT_INT_PTR, VT_NULL, VT_R4, VT_UI1, VT_UINT, VT_UINT_PTR, VT_UNKNOWN, VT_VARIANT,
-    VariantClear,
+    VARENUM, VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_ARRAY, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_I2,
+    VT_I4, VT_INT, VT_INT_PTR, VT_NULL, VT_R4, VT_R8, VT_UI1, VT_UI2, VT_UI4, VT_UINT, VT_UINT_PTR,
+    VT_UNKNOWN, VT_VARIANT, VariantClear,
 };
 use windows::core::{BSTR, GUID, HRESULT, IUnknown, Interface, PWSTR, Result, w};
 
@@ -167,7 +167,6 @@ impl Var {
         Var(build(VT_I4, VARIANT_0_0_0 { lVal: x }))
     }
 
-    #[allow(dead_code)]
     pub fn float(x: f32) -> Self {
         Var(build(VT_R4, VARIANT_0_0_0 { fltVal: x }))
     }
@@ -184,7 +183,6 @@ impl Var {
         Var(build(VT_BOOL, VARIANT_0_0_0 { boolVal: value }))
     }
 
-    #[allow(dead_code)]
     pub fn text(s: &str) -> Self {
         Var(build(
             VT_BSTR,
@@ -195,7 +193,6 @@ impl Var {
     }
 
     /// Оборачивает объект, добавляя ссылку.
-    #[allow(dead_code)]
     pub fn object(unknown: &IUnknown) -> Self {
         Var::owned_object(unknown.clone())
     }
@@ -246,45 +243,56 @@ impl Var {
         }
     }
 
-    pub fn as_int(&self) -> Option<i32> {
+    /// Любое целое managed-значение как i64.
+    ///
+    /// Теги перечислены поимённо, потому что читать `lVal` у 16- и 8-битных
+    /// вариантов нельзя: старшие байты объединения там — мусор. Ширина важна:
+    /// `Main.GameUpdateCount` приезжает как `VT_UI4`, и без него счётчик тиков
+    /// молча читался бы как «нет значения».
+    fn as_i64(&self) -> Option<i64> {
         unsafe {
             let a = &self.0.Anonymous.Anonymous;
-            if a.vt == VT_I4 || a.vt == VT_INT || a.vt == VT_UINT || a.vt == VT_INT_PTR {
-                Some(a.Anonymous.lVal)
-            } else if a.vt == VT_R4 {
-                Some(a.Anonymous.fltVal as i32)
-            } else if a.vt == VT_BOOL {
-                Some(i32::from(a.Anonymous.boolVal.as_bool()))
-            } else {
-                None
+            let v = &a.Anonymous;
+            match a.vt {
+                VT_I4 | VT_INT | VT_INT_PTR => Some(v.lVal as i64),
+                VT_UI4 | VT_UINT | VT_UINT_PTR => Some(v.ulVal as i64),
+                VT_I2 => Some(v.iVal as i64),
+                VT_UI2 => Some(v.uiVal as i64),
+                VT_UI1 => Some(v.bVal as i64),
+                VT_BOOL => Some(i64::from(v.boolVal.as_bool())),
+                VT_R4 => Some(v.fltVal as i64),
+                VT_R8 => Some(v.dblVal as i64),
+                _ => None,
             }
         }
+    }
+
+    pub fn as_int(&self) -> Option<i32> {
+        // Обрезание намеренное: `uint` со старшим битом нам встречается только
+        // у счётчиков, где важна разница соседних значений, а не сама величина.
+        self.as_i64().map(|v| v as i32)
+    }
+
+    /// Беззнаковое целое — счётчики игры объявлены `uint`.
+    pub fn as_u32(&self) -> Option<u32> {
+        self.as_i64().map(|v| v as u32)
     }
 
     pub fn as_float(&self) -> Option<f32> {
         unsafe {
             let a = &self.0.Anonymous.Anonymous;
             if a.vt == VT_R4 {
-                Some(a.Anonymous.fltVal)
-            } else if a.vt == VT_I4 {
-                Some(a.Anonymous.lVal as f32)
-            } else {
-                None
+                return Some(a.Anonymous.fltVal);
+            }
+            if a.vt == VT_R8 {
+                return Some(a.Anonymous.dblVal as f32);
             }
         }
+        self.as_i64().map(|v| v as f32)
     }
 
     pub fn as_bool(&self) -> Option<bool> {
-        unsafe {
-            let a = &self.0.Anonymous.Anonymous;
-            if a.vt == VT_BOOL {
-                Some(a.Anonymous.boolVal.as_bool())
-            } else if a.vt == VT_I4 {
-                Some(a.Anonymous.lVal != 0)
-            } else {
-                None
-            }
-        }
+        self.as_i64().map(|v| v != 0)
     }
 
     pub fn as_string(&self) -> Option<String> {
@@ -314,7 +322,6 @@ impl Var {
 // ---------------------------------------------------------------------------
 
 /// Длина managed-массива, приехавшего как SAFEARRAY.
-#[allow(dead_code)]
 pub fn array_len(array: &Var) -> Result<i32> {
     let handle = array
         .safearray()
@@ -396,8 +403,9 @@ pub struct Method(IUnknown);
 
 pub struct Field {
     info: IUnknown,
-    #[allow(dead_code)]
-    pub name: &'static str,
+    /// Имя поля попадает в текст ошибки: по одному HRESULT непонятно,
+    /// какое именно чтение сорвалось, а в логе это единственная зацепка.
+    name: &'static str,
 }
 
 impl Assembly {
@@ -437,7 +445,7 @@ impl Type {
             let mut out: *mut c_void = ptr::null_mut();
             f(this(&self.0), bstr.as_ptr() as *mut u16, &mut out).ok()?;
             if out.is_null() {
-                return Err(err("поле не найдено"));
+                return Err(err(&format!("поле {name} не найдено")));
             }
             Ok(Field {
                 info: IUnknown::from_raw(out),
@@ -455,7 +463,7 @@ impl Type {
             let mut out: *mut c_void = ptr::null_mut();
             f(this(&self.0), bstr.as_ptr() as *mut u16, flags, &mut out).ok()?;
             if out.is_null() {
-                return Err(err("поле не найдено"));
+                return Err(err(&format!("поле {name} не найдено")));
             }
             Ok(Field {
                 info: IUnknown::from_raw(out),
@@ -473,7 +481,7 @@ impl Type {
             let mut out: *mut c_void = ptr::null_mut();
             f(this(&self.0), bstr.as_ptr() as *mut u16, &mut out).ok()?;
             if out.is_null() {
-                return Err(err("метод не найден"));
+                return Err(err(&format!("метод {name} не найден")));
             }
             Ok(Method(IUnknown::from_raw(out)))
         }
@@ -485,7 +493,9 @@ impl Field {
         unsafe {
             let f: FnVariantOutVariant = vfn(&self.info, SLOT_FIELDINFO_GETVALUE);
             let mut out = VARIANT::default();
-            f(this(&self.info), target.abi(), &mut out).ok()?;
+            f(this(&self.info), target.abi(), &mut out)
+                .ok()
+                .map_err(|e| err(&format!("чтение поля {}: {e}", self.name)))?;
             Ok(Var::from_raw(out))
         }
     }
@@ -493,7 +503,9 @@ impl Field {
     pub fn set(&self, target: &Var, value: Var) -> Result<()> {
         unsafe {
             let f: FnVariantVariant = vfn(&self.info, SLOT_FIELDINFO_SETVALUE_2);
-            f(this(&self.info), target.abi(), value.abi()).ok()?;
+            f(this(&self.info), target.abi(), value.abi())
+                .ok()
+                .map_err(|e| err(&format!("запись поля {}: {e}", self.name)))?;
         }
         Ok(())
     }
@@ -510,7 +522,6 @@ impl Field {
 impl Method {
     /// Сам `MethodInfo` как значение — чтобы вызывать методы на нём самом
     /// (например `get_MethodHandle`).
-    #[allow(dead_code)]
     pub fn as_var(&self) -> Var {
         Var::object(&self.0)
     }

@@ -14,17 +14,7 @@ pub enum FilterMode {
     Whitelist,
 }
 
-impl FilterMode {
-    #[allow(dead_code)]
-    pub fn toggled(self) -> Self {
-        match self {
-            FilterMode::Blacklist => FilterMode::Whitelist,
-            FilterMode::Whitelist => FilterMode::Blacklist,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub filter_mode: FilterMode,
@@ -46,8 +36,10 @@ pub struct Config {
     /// с конкретной сборкой игры.
     pub cursor_detour: bool,
 
-    /// Снять троттлинг игры при потере фокуса (Main.ThrottleWhenInactive = false).
-    /// Без этого свёрнутая игра спит по 20 мс на кадр.
+    /// Снять сон игры при потере фокуса (`Main.ThrottleWhenInactive = false`).
+    /// Без этого свёрнутая игра спит по 20 мс на тик; со снятым сном скорость
+    /// держит своя выдержка в `input::pace`, иначе мир разгоняется в десятки
+    /// раз. При выгрузке прежнее значение возвращается игре.
     pub disable_inactive_throttle: bool,
 
     /// Разброс задержек перед забросом и подсечкой, мс.
@@ -59,7 +51,8 @@ pub struct Config {
     /// Какие из трёх зелий пить: Fishing / Sonar / Crate.
     pub potions: [bool; 3],
 
-    /// Виртуальные коды клавиш. По умолчанию Insert / End / Delete.
+    /// Виртуальные коды клавиш. По умолчанию стрелка вверх, стрелка вниз
+    /// и Delete.
     pub hotkey_ui: u16,
     pub hotkey_toggle: u16,
     pub hotkey_unload: u16,
@@ -199,8 +192,11 @@ impl Config {
              # тогда она уйдёт в Present и окажется поверх курсора.\n\
              cursor_detour = {cursor_detour}\n\
              \n\
-             # Снять троттлинг игры при потере фокуса (Main.ThrottleWhenInactive).\n\
-             # Без этого свёрнутая игра спит по 20 мс на кадр и рыбалка ползёт.\n\
+             # Снять сон игры при потере фокуса (Main.ThrottleWhenInactive).\n\
+             # Без этого свёрнутая игра спит по 20 мс на тик и рыбалка идёт\n\
+             # медленнее. Скорость при снятом сне держим сами — ровно 60 тиков\n\
+             # в секунду, как у игры; выключать эту строку нужно только если\n\
+             # своя выдержка почему-то мешает.\n\
              disable_inactive_throttle = {disable_inactive_throttle}\n\
              \n\
              # Разброс задержек перед забросом и подсечкой, миллисекунды.\n\
@@ -272,28 +268,27 @@ mod tests {
     /// Конфиг пишется руками, а читается `serde`. Значит, написанное должно
     /// читаться обратно — иначе первое же сохранение сделает файл битым,
     /// и заметит это только пользователь.
+    ///
+    /// Сравниваем структуры целиком, а не выборочные поля: смысл проверки
+    /// в том, чтобы новое поле, забытое в `to_commented_toml`, роняло тест,
+    /// а не тихо терялось при каждом сохранении.
     #[test]
     fn commented_toml_reads_back() {
-        let mut written = Config::default();
-        written.filter_mode = FilterMode::Whitelist;
-        written.whitelist = vec![2290, 2297];
-        written.blacklist = vec![];
-        written.potions = [false, true, false];
-        written.jitter_min_ms = 7;
-        written.chat_messages = false;
-        written.chat_color_quest = "ABCDEF".to_string();
+        let written = Config {
+            filter_mode: FilterMode::Whitelist,
+            whitelist: vec![2290, 2297],
+            blacklist: vec![],
+            potions: [false, true, false],
+            jitter_min_ms: 7,
+            chat_messages: false,
+            chat_color_quest: "ABCDEF".to_string(),
+            ..Config::default()
+        };
 
         let text = written.to_commented_toml();
         let read: Config = toml::from_str(&text).expect("конфиг не читается обратно");
 
-        assert_eq!(read.filter_mode, written.filter_mode);
-        assert_eq!(read.whitelist, written.whitelist);
-        assert_eq!(read.blacklist, written.blacklist);
-        assert_eq!(read.potions, written.potions);
-        assert_eq!(read.jitter_min_ms, written.jitter_min_ms);
-        assert_eq!(read.chat_messages, written.chat_messages);
-        assert_eq!(read.chat_color_quest, written.chat_color_quest);
-        assert_eq!(read.hotkey_unload, written.hotkey_unload);
+        assert_eq!(read, written, "поле потерялось при сохранении");
     }
 
     /// Цвет из конфига должен доезжать до тега игры в шести цифрах,

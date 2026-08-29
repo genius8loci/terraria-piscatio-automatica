@@ -26,7 +26,7 @@ mod xnb;
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use minhook::MinHook;
 use windows::Win32::Foundation::RECT;
@@ -50,7 +50,6 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 use windows::core::{HRESULT, Interface};
 
-use crate::SHOW_UI;
 use icons::IconAtlas;
 use xnb::GameFont;
 
@@ -217,7 +216,28 @@ static STATE_BLOCK: AtomicUsize = AtomicUsize::new(0);
 static FONT: OnceLock<Option<GameFont>> = OnceLock::new();
 static ICONS: Mutex<Option<IconAtlas>> = Mutex::new(None);
 /// Набор предметов, под который собран текущий атлас: id и число кадров.
-static ICON_ITEMS: Mutex<Vec<(i32, u32)>> = Mutex::new(Vec::new());
+/// `None` — атлас не собирали ещё ни разу.
+static ICON_ITEMS: Mutex<Option<Vec<(i32, u32)>>> = Mutex::new(None);
+
+// Замки берём с разотравлением: под ними лежат пиксели и раскладка панели,
+// после паники они устаревают, но не становятся опасными. Отказ же брать
+// такой замок означал бы панель, которая молча исчезла навсегда.
+
+fn ui_state() -> MutexGuard<'static, Option<ui::UiState>> {
+    UI.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn icons_slot() -> MutexGuard<'static, Option<IconAtlas>> {
+    ICONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn icon_items() -> MutexGuard<'static, Option<Vec<(i32, u32)>>> {
+    ICON_ITEMS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -571,18 +591,7 @@ unsafe fn present(
         // Ресурсы заводим только здесь. В детуре курсора мы внутри чужой
         // открытой сцены, и создавать там текстуры незачем: `Present`
         // случается каждый кадр и успевает подготовить всё заранее.
-        let shown = SHOW_UI.load(Ordering::Relaxed);
-        if shown {
-            prepare(device);
-        } else {
-            OVER_UI.store(false, Ordering::Relaxed);
-            HOVER_ITEM.store(0, Ordering::Relaxed);
-            HOVER_HINT.store(ui::HINT_NONE, Ordering::Relaxed);
-            // Иначе нажатие, сделанное при скрытой панели, сработает,
-            // как только её покажут.
-            MOUSE_CLICK.store(false, Ordering::Relaxed);
-            WHEEL.store(0, Ordering::Relaxed);
-        }
+        prepare(device);
         // Пока курсор над окном, игра не должна считать клик игровым.
         // Значение посчитал детур курсора чуть раньше в этом же кадре.
         if OVER_UI.load(Ordering::Relaxed) {
@@ -599,7 +608,7 @@ unsafe fn present(
         // когда `Main.cursorOverride != -1`. Свой поверх её собственного
         // и вылезал белой стрелкой.
         let already = DREW_IN_CURSOR.swap(false, Ordering::SeqCst);
-        if !already && shown && !BROKEN.load(Ordering::Relaxed) {
+        if !already && !BROKEN.load(Ordering::Relaxed) {
             guarded(device, !crate::detour::cursor_is_active());
         }
     }
@@ -996,62 +1005,57 @@ impl<'a> Painter<'a> {
 static UI: Mutex<Option<ui::UiState>> = Mutex::new(None);
 /// Прошлое состояние кнопки — чтобы ловить нажатие по фронту.
 static MOUSE_WAS_DOWN: AtomicBool = AtomicBool::new(false);
-/// Атлас иконок устарел и требует пересборки.
-static ICONS_STALE: AtomicBool = AtomicBool::new(false);
+/// Пиксели атласа сменились — текстуру надо залить заново.
+static ICON_TEXTURE_STALE: AtomicBool = AtomicBool::new(false);
 
-/// Просит пересобрать атлас иконок под новый набор предметов.
+/// Собирает атлас иконок под новый набор предметов.
 /// Второе число в паре — сколько кадров анимации в картинке предмета.
-pub fn set_icon_items(items: Vec<(i32, u32)>) {
-    if let Ok(mut slot) = ICON_ITEMS.lock() {
-        if *slot == items {
-            return;
-        }
-        *slot = items;
+///
+/// **Звать только с рабочего потока.** Это чтение и распаковка LZX полутора
+/// сотен файлов `Content/Images`: в игровом кадре такая работа встаёт
+/// заметным стопором, а `Present` от неё ждал сотни миллисекунд.
+/// Кадру остаётся только заливка готовых пикселей в текстуру.
+pub fn build_icons(items: Vec<(i32, u32)>) {
+    if icon_items().as_ref() == Some(&items) {
+        return;
     }
-    ICONS_STALE.store(true, Ordering::SeqCst);
+    // Собираем вне замков: под `ICONS` идёт отрисовка кадра, и держать его
+    // на всё время распаковки — то же самое, что распаковывать в кадре.
+    let content = content_dir();
+    let Some(atlas) = icons::build(content.as_deref(), &items) else {
+        crate::log!("оверлей: атлас собрать не вышло");
+        return;
+    };
+    crate::log!(
+        "оверлей: атлас {}x{}, картинок {}",
+        atlas.width,
+        atlas.height,
+        atlas.len()
+    );
+    *icon_items() = Some(items);
+    *icons_slot() = Some(atlas);
+    ICON_TEXTURE_STALE.store(true, Ordering::SeqCst);
 }
 
-/// Держит атлас в актуальном виде. Пиксели собираются один раз: после
-/// `Reset` теряется только текстура, перечитывать файлы незачем.
+/// Заливает готовые пиксели в текстуру. Пиксели собираются один раз
+/// на рабочем потоке: после `Reset` теряется только текстура,
+/// перечитывать файлы незачем.
 fn ensure_icons(device: &IDirect3DDevice9) {
-    if ICONS_STALE.swap(false, Ordering::SeqCst) {
-        if let Ok(mut slot) = ICONS.lock() {
-            *slot = None;
-        }
+    if ICON_TEXTURE_STALE.swap(false, Ordering::SeqCst) {
         let previous = ICON_TEXTURE.swap(0, Ordering::SeqCst);
         if previous != 0 {
             unsafe { drop(IDirect3DTexture9::from_raw(previous as *mut c_void)) };
         }
     }
-
-    let Ok(mut slot) = ICONS.lock() else {
+    if ICON_TEXTURE.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    let slot = icons_slot();
+    let Some(atlas) = slot.as_ref() else {
         return;
     };
-    if slot.is_none() {
-        let Some(content) = content_dir() else {
-            return;
-        };
-        let items = ICON_ITEMS.lock().map(|i| i.clone()).unwrap_or_default();
-        let Some(atlas) = icons::build(&content, &items) else {
-            crate::log!("оверлей: атлас собрать не вышло");
-            return;
-        };
-        crate::log!(
-            "оверлей: атлас {}x{}, картинок {}",
-            atlas.width,
-            atlas.height,
-            atlas.len()
-        );
-        *slot = Some(atlas);
-    }
-
-    if ICON_TEXTURE.load(Ordering::Relaxed) == 0 {
-        let Some(atlas) = slot.as_ref() else {
-            return;
-        };
-        if let Some(texture) = create_texture(device, atlas.width, atlas.height, &atlas.pixels) {
-            ICON_TEXTURE.store(texture.into_raw() as usize, Ordering::SeqCst);
-        }
+    if let Some(texture) = create_texture(device, atlas.width, atlas.height, &atlas.pixels) {
+        ICON_TEXTURE.store(texture.into_raw() as usize, Ordering::SeqCst);
     }
 }
 
@@ -1097,10 +1101,7 @@ pub(crate) fn set_ui_scale(scale: f32) {
 /// Зовётся из детура `Main.DrawCursor`, с игрового потока и внутри кадра.
 /// Здесь весь интерфейс игры уже выгружен на экран, а курсор ещё нет.
 pub fn on_draw_cursor() {
-    if !ACTIVE.load(Ordering::Relaxed)
-        || !SHOW_UI.load(Ordering::Relaxed)
-        || BROKEN.load(Ordering::Relaxed)
-    {
+    if !ACTIVE.load(Ordering::Relaxed) || BROKEN.load(Ordering::Relaxed) {
         return;
     }
     let raw = DEVICE.load(Ordering::Relaxed);
@@ -1134,9 +1135,7 @@ pub fn on_draw_cursor() {
 
 /// Забирает у игры новое значение строки поиска.
 pub(crate) fn pump_search_text() {
-    let Ok(mut guard) = UI.lock() else {
-        return;
-    };
+    let mut guard = ui_state();
     let Some(state) = guard.as_mut() else {
         return;
     };
@@ -1158,9 +1157,7 @@ pub fn is_typing() -> bool {
 /// Раскрывает или сворачивает панель — то же, что клик по стрелке.
 /// Сама стрелка при этом остаётся на месте.
 pub fn toggle_expanded() {
-    let Ok(mut guard) = UI.lock() else {
-        return;
-    };
+    let mut guard = ui_state();
     let state = guard.get_or_insert_with(ui::UiState::default);
     state.expanded = !state.expanded;
     if !state.expanded {
@@ -1234,8 +1231,8 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
 
     let frame = {
         let font = FONT.get().and_then(|f| f.as_ref());
-        let atlas_guard = ICONS.lock().ok();
-        let atlas = atlas_guard.as_ref().and_then(|g| g.as_ref());
+        let atlas_guard = icons_slot();
+        let atlas = atlas_guard.as_ref();
         let mut painter = Painter {
             ui: &mut ui_quads,
             text: &mut text,
@@ -1243,13 +1240,11 @@ pub(crate) unsafe fn draw(raw: *mut c_void, own_cursor: bool) {
             atlas,
             scale: 1.0,
         };
-        let Ok(mut guard) = UI.lock() else {
-            return;
-        };
-        let ui_state = guard.get_or_insert_with(ui::UiState::default);
+        let mut guard = ui_state();
+        let state = guard.get_or_insert_with(ui::UiState::default);
         ui::build(
             &mut painter,
-            ui_state,
+            state,
             input,
             screen,
             ui_scale(),

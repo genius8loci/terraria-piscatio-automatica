@@ -3,6 +3,7 @@
 //! Цикл хоткеев живёт независимо от подключения к игре — иначе неудачный
 //! attach убивал бы поток вместе с возможностью выгрузить DLL.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -16,7 +17,7 @@ use crate::config::{Config, FilterMode};
 use crate::fishing::Fishing;
 use crate::game::Game;
 use crate::overlay::state::{self, Mark};
-use crate::{SHOW_UI, SHUTDOWN, UNLOAD_REQUESTED, crash, detour, input, lang, log, overlay};
+use crate::{SHUTDOWN, UNLOAD_REQUESTED, crash, detour, input, lang, log, overlay};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
 /// Чтение состояния игры заметно дороже опроса клавиш.
@@ -106,24 +107,37 @@ pub fn run(dll_dir: PathBuf) {
     let mut attempts: u32 = 0;
     let mut next_attach = Instant::now();
     let mut gave_up = false;
+    // Каким `Main.ThrottleWhenInactive` был до нас — вернём его при выгрузке.
+    // Иначе наша правка уезжает в `config.json` игры (она сохраняет это поле
+    // при выходе) и разгоняет мир при сворачивании уже без всякой DLL.
+    let mut throttle_was: Option<bool> = None;
 
     let mut fishing = Fishing::new();
     let mut last_tick = Instant::now() - TICK_INTERVAL;
     let mut last_status = Instant::now();
     let mut last_lang = Instant::now();
 
-    // Стрелка сворачивания видна с самого начала: без неё панель нечем
-    // открыть мышью, а хоткей знает не всякий.
-    SHOW_UI.store(true, Ordering::Relaxed);
     if overlay::install() {
         log!("оверлей установлен, стрелка вверх раскрывает и сворачивает панель");
     }
+    // Служебную графику панели собираем сразу и здесь же, на рабочем потоке:
+    // до подключения к игре список предметов пуст, но белый квадратик и рамки
+    // нужны панели с первого кадра — через них идут все её заливки.
+    overlay::build_icons(Vec::new());
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
-        // Хоткеи слушаем только когда игра впереди и когда не идёт набор
-        // в строке поиска. Фронт нажатия снимаем в любом случае, иначе
-        // после возвращения в игру сработало бы разом всё нажатое мимо.
-        let active = game_focused() && !overlay::is_typing();
+        // Игровому потоку нужно знать, впереди ли окно: при свёрнутом он сам
+        // держит выдержку тиков, иначе игра разгоняется, см. `input::pace`.
+        let focused = game_focused();
+        input::set_window_active(focused);
+
+        // Хоткеи слушаем только когда игра впереди, когда не идёт набор
+        // в нашей строке поиска и когда не открыт чат игры: там стрелки
+        // листают историю, а Delete правит строку. Фронт нажатия снимаем
+        // в любом случае, иначе после возвращения в игру сработало бы разом
+        // всё нажатое мимо.
+        let chat_open = focused && game.as_ref().is_some_and(|g| g.chat_open());
+        let active = focused && !chat_open && !overlay::is_typing();
 
         if key_unload.pressed(active) {
             log!("запрошена выгрузка");
@@ -172,7 +186,7 @@ pub fn run(dll_dir: PathBuf) {
                             None => "неизвестна".to_string(),
                         }
                     );
-                    apply_settings(&attached, &config);
+                    throttle_was = apply_settings(&attached, &config);
                     let ready = install_detour(&attached);
                     state::with(|s| s.status.detour_ready = ready);
                     if config.cursor_detour {
@@ -248,6 +262,15 @@ pub fn run(dll_dir: PathBuf) {
         std::thread::sleep(POLL_INTERVAL);
     }
 
+    // Возвращаем игре её собственную настройку: она сохранит её в свой
+    // `config.json`, и без нас свёрнутая игра снова будет спать, как задумано.
+    if let (Some(attached), Some(was)) = (game.as_ref(), throttle_was) {
+        match attached.set_inactive_throttle(was) {
+            Ok(()) => log!("ThrottleWhenInactive возвращён в {was}"),
+            Err(e) => log!("вернуть ThrottleWhenInactive не вышло: {e}"),
+        }
+    }
+
     log!("рабочий поток остановлен");
     unsafe { CoUninitialize() };
 }
@@ -318,31 +341,27 @@ fn load_fishable(game: &mut Game) {
             if animated > 0 {
                 log!("анимированных иконок: {animated}");
             }
-            overlay::set_icon_items(icons);
+            overlay::build_icons(icons);
 
             // Имена нужны поиску в фильтре. Спрашиваем их один раз здесь,
             // на рабочем потоке: на потоке рендера столько вызовов в CLR
             // за кадр делать нельзя.
-            let mut names: Vec<state::ItemFacts> = Vec::with_capacity(items.len());
-            for id in &items {
-                if let Some((name, quest)) = game.item_facts(*id) {
-                    names.push(state::ItemFacts {
-                        id: *id,
-                        search: name.to_lowercase(),
-                        display: name,
-                        quest,
-                    });
-                }
-            }
+            let mut names: HashMap<i32, state::ItemFacts> = HashMap::with_capacity(items.len());
             // Зелья в `FishDropsDB` не попадают, а их имена нужны чату.
-            for (item, _, _) in crate::game::POTIONS.iter() {
-                if let Some((name, quest)) = game.item_facts(*item) {
-                    names.push(state::ItemFacts {
-                        id: *item,
-                        search: name.to_lowercase(),
-                        display: name,
-                        quest,
-                    });
+            let asked = items
+                .iter()
+                .copied()
+                .chain(crate::game::POTIONS.iter().map(|(item, _, _)| *item));
+            for id in asked {
+                if let Some((name, quest)) = game.item_facts(id) {
+                    names.insert(
+                        id,
+                        state::ItemFacts {
+                            search: name.to_lowercase(),
+                            display: name,
+                            quest,
+                        },
+                    );
                 }
             }
             log!("имён предметов получено: {}", names.len());
@@ -391,16 +410,31 @@ fn install_cursor_detour(game: &Game) {
     }
 }
 
-fn apply_settings(game: &Game, config: &Config) {
+/// Снимает сон свёрнутой игры и возвращает прежнее значение, чтобы при
+/// выгрузке вернуть всё как было.
+///
+/// Скорость свёрнутой игры после этого держит не она, а мы: `input::pace`
+/// выдерживает 60 тиков в секунду. Без выдержки снятый сон разгонял мир
+/// в сорок раз — сутки за полминуты.
+fn apply_settings(game: &Game, config: &Config) -> Option<bool> {
     if !config.disable_inactive_throttle {
-        return;
+        return None;
     }
+    let was = match game.inactive_throttle() {
+        Ok(v) => v,
+        Err(e) => {
+            log!("троттлинг прочитать не вышло, трогать его не буду: {e}");
+            return None;
+        }
+    };
     match game.set_inactive_throttle(false) {
-        Ok(()) => match game.inactive_throttle() {
-            Ok(false) => log!("ThrottleWhenInactive снят — свёрнутая игра не будет спать"),
-            Ok(true) => log!("ThrottleWhenInactive записан, но остался включённым"),
-            Err(e) => log!("ThrottleWhenInactive записан, перечитать не вышло: {e}"),
-        },
-        Err(e) => log!("не удалось снять троттлинг: {e}"),
+        Ok(()) => {
+            log!("ThrottleWhenInactive снят (был {was}) — выдержку тиков держим сами");
+            Some(was)
+        }
+        Err(e) => {
+            log!("не удалось снять троттлинг: {e}");
+            None
+        }
     }
 }

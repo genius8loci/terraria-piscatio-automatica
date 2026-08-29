@@ -237,12 +237,19 @@ pub struct Layout<'a, 'b> {
 }
 
 impl<'a, 'b> Layout<'a, 'b> {
+    /// Попадание с нажатием. Нажатие при этом **забирается**: один щелчок
+    /// обязан сработать ровно в одном месте. Иначе он проходит сквозь всё,
+    /// что оказалось под курсором в этом кадре, — а окна у нас накладываются.
     fn hit(&mut self, r: Rect) -> bool {
         if !r.contains(self.input.x, self.input.y) {
             return false;
         }
         self.over_ui = true;
-        self.input.clicked
+        if !self.input.clicked {
+            return false;
+        }
+        self.input.clicked = false;
+        true
     }
 
     fn hovered(&self, r: Rect) -> bool {
@@ -887,19 +894,22 @@ fn filter_window(
     cell: f32,
 ) {
     // Поиск по именам: их спрашивает у игры рабочий поток при подключении.
+    // Отметки снимаем здесь же, одним заходом под замок: раньше он брался
+    // на каждую видимую ячейку, то есть по полсотни раз за кадр.
     let query = ui.search.trim().to_lowercase();
-    let items: Vec<i32> = state::with(|s| {
-        if query.is_empty() {
-            return s.fishable.clone();
-        }
-        s.fishable
-            .iter()
-            .filter(|id| {
-                s.facts(**id)
+    let items: Vec<(i32, Mark)> = state::with(|s| {
+        let mut out = Vec::with_capacity(s.fishable.len());
+        for id in &s.fishable {
+            if !query.is_empty()
+                && !s
+                    .facts(*id)
                     .is_some_and(|facts| facts.search.contains(&query))
-            })
-            .copied()
-            .collect()
+            {
+                continue;
+            }
+            out.push((*id, s.filter.get(id).copied().unwrap_or(Mark::Neutral)));
+        }
+        out
     })
     .unwrap_or_default();
 
@@ -1007,7 +1017,8 @@ fn filter_window(
     let first = ui.filter_row * cols;
     let last = (first + visible * cols).min(items.len());
 
-    for (offset, item) in items[first..last].iter().enumerate() {
+    let mut clicked: Option<(i32, Mark)> = None;
+    for (offset, (item, mark)) in items[first..last].iter().enumerate() {
         let col = offset % cols;
         let row = offset / cols;
         let r = Rect {
@@ -1016,20 +1027,21 @@ fn filter_window(
             w: cell,
             h: cell,
         };
-        let mark = state::with(|s| s.filter.get(item).copied().unwrap_or(Mark::Neutral))
-            .unwrap_or(Mark::Neutral);
         if layout.hit_item(r, *item) {
-            state::with(|s| {
-                let next = s.filter.get(item).copied().unwrap_or(Mark::Neutral).next();
-                if next == Mark::Neutral {
-                    s.filter.remove(item);
-                } else {
-                    s.filter.insert(*item, next);
-                }
-                s.dirty = true;
-            });
+            clicked = Some((*item, *mark));
         }
-        layout.item_cell(r, *item, mark);
+        layout.item_cell(r, *item, *mark);
+    }
+    // Правку общего состояния делаем один раз и после обхода: внутри цикла
+    // это был бы захват замка на каждую ячейку.
+    if let Some((item, mark)) = clicked {
+        state::with(|s| {
+            match mark.next() {
+                Mark::Neutral => s.filter.remove(&item),
+                next => s.filter.insert(item, next),
+            };
+            s.dirty = true;
+        });
     }
 
     if scrollable {
@@ -1238,6 +1250,8 @@ fn scrollbar(
     // пока кнопка держится. Отпустили — отпустили, даже если курсор ушёл.
     if layout.input.clicked && layout.hovered(handle) {
         ui.drag = Some(layout.input.y - handle.y);
+        // Захват — тоже действие: нажатие дальше не идёт.
+        layout.input.clicked = false;
     }
     if !layout.input.down {
         ui.drag = None;

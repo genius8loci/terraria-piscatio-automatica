@@ -12,7 +12,9 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::core::IUnknown;
 
 use crate::clr::{
@@ -21,12 +23,17 @@ use crate::clr::{
 use crate::crash;
 
 pub const CMD_NONE: u8 = 0;
-/// Нажать в этом кадре.
+/// Нажать в этом тике.
 pub const CMD_PRESS: u8 = 1;
-/// Нажатие уже выставлено, в следующем кадре отпустить.
+/// Нажатие уже выставлено, в следующем тике отпустить.
 const CMD_RELEASE: u8 = 2;
 
 pub static COMMAND: AtomicU8 = AtomicU8::new(CMD_NONE);
+/// Нажатие сняли на полпути: оно уже выставлено, а отпустить некому.
+/// Поле надо вернуть в исходное состояние, иначе мы оставим за собой
+/// «кнопка держится» — игра его перетирает каждый тик, но полагаться
+/// на это значит зависеть от порядка внутри чужого кадра.
+static RELEASE: AtomicBool = AtomicBool::new(false);
 /// Заявка «разложить по ближайшим сундукам». Отдельно от `COMMAND`:
 /// раскладка не занимает кадров и с нажатием не конфликтует.
 static QUICK_STACK: AtomicBool = AtomicBool::new(false);
@@ -50,11 +57,116 @@ pub static FAILURES: AtomicU32 = AtomicU32::new(0);
 /// Сколько раз раскладка по сундукам прошла.
 pub static STACKS: AtomicU32 = AtomicU32::new(0);
 
-/// Кадр, в котором команда уже применялась.
-static LAST_FRAME: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Тик, в котором команда уже применялась.
+static LAST_TICK: AtomicU32 = AtomicU32::new(u32::MAX);
+
+// ---------------------------------------------------------------------------
+// Выдержка тиков при свёрнутом окне
+// ---------------------------------------------------------------------------
+//
+// У свёрнутой игры не остаётся ни одного ограничителя скорости: кадры она
+// не рисует, значит и вертикальной синхронизации в `Present` нет, а шаг
+// цикла не фиксирован (`FrameSkipMode != 0`). Единственный тормоз — сон при
+// потере фокуса, и его мы снимаем сами, чтобы рыбалка шла в полную силу.
+// Без замены цикл разгоняется до тысяч тиков в секунду: замерено 2408 против
+// 60, то есть мир живёт в сорок раз быстрее — сутки за полминуты.
+//
+// Поэтому выдержку держим здесь. `Player.ItemCheck` вызывается ровно раз
+// на игрока за тик, так что это единственная точка, которая идёт в ногу
+// с циклом и при свёрнутом окне тоже.
+
+/// Сколько времени отводится одному тику: 60 в секунду, как у игры.
+const TICK_PERIOD: Duration = Duration::from_micros(16_667);
+
+/// Окно игры не впереди — выдержку держим мы. Ставит рабочий поток.
+static INACTIVE: AtomicBool = AtomicBool::new(false);
+/// Разрешение системного таймера поднято до миллисекунды.
+static PERIOD_RAISED: AtomicBool = AtomicBool::new(false);
+
+/// Сообщает, впереди ли окно игры. Зовёт рабочий поток, раз в опрос.
+pub fn set_window_active(active: bool) {
+    INACTIVE.store(!active, Ordering::Relaxed);
+}
+
+/// Номер тика и время, на которое он был выдержан.
+static PACE: GameThreadCell<Option<(u32, Instant)>> = GameThreadCell(UnsafeCell::new(None));
+
+/// Держит свёрнутую игру на 60 тиках в секунду.
+///
+/// Возвращает номер текущего тика, если его удалось узнать: он же нужен
+/// дальше как граница тика, и читать его дважды незачем.
+///
+/// Звать только при неактивном окне — отметку прошлого тика сбрасывает
+/// вызывающий, как только окно возвращается.
+///
+/// Сон идёт на игровом потоке изнутри managed-метода, то есть сборка мусора
+/// на это время откладывается. Задержка ограничена одним тиком и бывает
+/// только при свёрнутом окне, когда игре и без того нечего рисовать, —
+/// это заметно дешевле, чем сорокакратный разгон мира.
+fn pace(handles: &Handles) -> Option<u32> {
+    // Без миллисекундного разрешения `Sleep` округляется до 15.6 мс, и вместо
+    // шестидесяти тиков вышло бы тридцать два.
+    if !PERIOD_RAISED.swap(true, Ordering::Relaxed) {
+        let _ = unsafe { timeBeginPeriod(1) };
+    }
+
+    let tick = tick_now(handles)?;
+    let slot = unsafe { &mut *PACE.0.get() };
+    let now = Instant::now();
+    match *slot {
+        // Тот же тик, просто другой игрок: в сетевой игре `ItemCheck`
+        // вызывается по разу на каждого. Спать второй раз нельзя.
+        Some((last, _)) if last == tick => {}
+        Some((_, at)) => {
+            let due = at + TICK_PERIOD;
+            if now < due {
+                std::thread::sleep(due - now);
+                // Считаем от расчётного мгновения, а не от фактического
+                // пробуждения: иначе округление сна копилось бы в отставание.
+                *slot = Some((tick, due));
+            } else {
+                *slot = Some((tick, now));
+            }
+        }
+        None => *slot = Some((tick, now)),
+    }
+    Some(tick)
+}
+
+/// Возвращает системе прежнее разрешение таймера и гасит выдержку: рабочего
+/// потока больше нет, обновлять признак активности окна некому.
+pub fn shutdown() {
+    INACTIVE.store(false, Ordering::Relaxed);
+    if PERIOD_RAISED.swap(false, Ordering::SeqCst) {
+        let _ = unsafe { timeEndPeriod(1) };
+    }
+}
+
+/// Номер игрового тика — `Main.GameUpdateCount`.
+///
+/// Именно тик, а не кадр: свёрнутая игра обновляется, но не рисует, поэтому
+/// счётчик кадров из хука `Present` там замирает. На нём граница «нажали —
+/// отпустили» не наступала никогда, и при свёрнутом окне не проходил
+/// ни один заброс — автомат только ставил команды и снимал их по таймауту.
+fn tick_now(handles: &Handles) -> Option<u32> {
+    let source = handles.update_count.as_ref()?;
+    match source {
+        TickSource::Property(getter) => getter.invoke(&Var::null(), &[]).ok()?.as_u32(),
+        TickSource::Field(field) => field.get_static().ok()?.as_u32(),
+    }
+}
+
+/// Откуда брать номер тика: в 1.4.5.8 `GameUpdateCount` — свойство, но
+/// приватное поле за ним читается дешевле, поэтому берём его, если нашлось.
+enum TickSource {
+    Property(Method),
+    Field(Field),
+}
 
 struct Handles {
     _clr: Clr,
+    /// `Main.GameUpdateCount` — счётчик игровых тиков, см. `tick_now`.
+    update_count: Option<TickSource>,
     my_player: Field,
     players: Field,
     mouse_x: Field,
@@ -176,35 +288,54 @@ static HOVERED: GameThreadCell<Option<Hovered>> = GameThreadCell(UnsafeCell::new
 pub fn on_item_check(_this: *mut c_void) {
     FIRED.fetch_add(1, Ordering::Relaxed);
 
+    // Выдержку держим всегда, а не только когда есть что делать: без неё
+    // свёрнутая игра разгоняет мир, даже если автомат простаивает.
+    let paced_tick = if INACTIVE.load(Ordering::Relaxed) {
+        handles().and_then(pace)
+    } else {
+        // Дёшево и без обращений к CLR: сбрасывает отметку выдержки.
+        unsafe { *PACE.0.get() = None };
+        None
+    };
+
     let command = COMMAND.load(Ordering::Acquire);
     let stack = QUICK_STACK.load(Ordering::Acquire);
     let chat = CHAT_PENDING.load(Ordering::Acquire);
     let sound = SOUND.load(Ordering::Acquire);
-    if command == CMD_NONE && !stack && !chat && !sound {
-        // Быстрый путь: в простое ни одного обращения к CLR.
-        return;
-    }
-
-    // На сервере ItemCheck вызывается по разу на каждого игрока за кадр.
-    // Без границы кадра нажатие и отпускание слиплись бы в один кадр,
-    // и предмет не сработал бы. Границу даёт счётчик из хука Present;
-    // если оверлей не поднят, счётчик стоит и ограничение не применяем.
-    let frame = crate::FRAME.load(Ordering::Relaxed);
-    if frame != 0 && LAST_FRAME.swap(frame, Ordering::Relaxed) == frame {
+    let release = RELEASE.load(Ordering::Acquire);
+    if command == CMD_NONE && !stack && !chat && !sound && !release {
+        // Быстрый путь: у игры впереди — ни одного обращения к CLR.
         return;
     }
 
     let Some(handles) = handles() else {
         FAILURES.fetch_add(1, Ordering::Relaxed);
         COMMAND.store(CMD_NONE, Ordering::Release);
+        RELEASE.store(false, Ordering::Release);
         QUICK_STACK.store(false, Ordering::Release);
         CHAT_PENDING.store(false, Ordering::Release);
-        if let Ok(mut queue) = CHAT.lock() {
-            queue.clear();
-        }
+        chat_queue().clear();
         crate::log!("ввод: поднять хэндлы не удалось, команда отменена");
         return;
     };
+
+    // В сетевой игре `ItemCheck` вызывается по разу на каждого игрока за тик.
+    // Без границы тика нажатие и отпускание слиплись бы в один, и предмет
+    // не сработал бы. Границу даёт счётчик игровых тиков; если его не нашлось,
+    // откатываемся на счётчик кадров — он врёт при свёрнутом окне, но это
+    // лучше, чем слипшаяся пара.
+    let tick = paced_tick
+        .or_else(|| tick_now(handles))
+        .unwrap_or_else(|| crate::FRAME.load(Ordering::Relaxed));
+    if tick != 0 && LAST_TICK.swap(tick, Ordering::Relaxed) == tick {
+        return;
+    }
+
+    if release {
+        RELEASE.store(false, Ordering::Release);
+        let _step = crash::Step::game(crash::STEP_CLICK);
+        set_use_item(handles, false);
+    }
 
     if stack {
         QUICK_STACK.store(false, Ordering::Release);
@@ -314,6 +445,7 @@ fn attach() -> Option<Handles> {
         })
     };
     Some(Handles {
+        update_count: tick_source(&main),
         my_player: main.field("myPlayer").ok()?,
         players: main.field("player").ok()?,
         mouse_x: main.field("mouseX").ok()?,
@@ -340,6 +472,38 @@ fn attach() -> Option<Handles> {
         text: text_api(&main, input.as_ref()),
         _clr: clr,
     })
+}
+
+/// Ищет счётчик игровых тиков.
+///
+/// В 1.4.5.8 `Main.GameUpdateCount` — свойство, так что `GetField` по этому
+/// имени ничего не найдёт. Геттер берём первым: у него смысл гарантирован
+/// именем, а шестьдесят вызовов в секунду ничего не стоят. Поле — только
+/// запасной путь, и то лишь публичное, под другую сборку игры: угадывать
+/// приватное имя ради экономии на вызове не стоит риска взять счётчик
+/// чего-то другого и намертво заклинить границу тика.
+fn tick_source(main: &Type) -> Option<TickSource> {
+    if let Ok(getter) = main.method("get_GameUpdateCount")
+        && getter
+            .invoke(&Var::null(), &[])
+            .ok()
+            .and_then(|v| v.as_u32())
+            .is_some()
+    {
+        crate::log!("ввод: счётчик тиков — свойство Main.GameUpdateCount");
+        return Some(TickSource::Property(getter));
+    }
+    if let Ok(field) = main.field("GameUpdateCount")
+        && field.get_static().ok().and_then(|v| v.as_u32()).is_some()
+    {
+        crate::log!("ввод: счётчик тиков — поле Main.GameUpdateCount");
+        return Some(TickSource::Field(field));
+    }
+    crate::log!(
+        "ввод: счётчика тиков не нашлось — граница тика уедет на счётчик \
+         кадров, и при свёрнутой игре нажатия снова перестанут проходить"
+    );
+    None
 }
 
 /// Собирает всё нужное для короткого звука. Не нашлось — просто не будет
@@ -415,15 +579,20 @@ pub fn quick_stack_pending() -> bool {
 /// Поставить строку в очередь на отправку в чат. Отправит её игровой поток
 /// в ближайшем кадре, см. `flush_chat`.
 pub fn queue_chat(line: String) {
-    let Ok(mut queue) = CHAT.lock() else {
-        return;
-    };
+    let mut queue = chat_queue();
     // Если разбирать очередь некому, старые строки уже неинтересны.
     if queue.len() >= CHAT_LIMIT {
         queue.remove(0);
     }
     queue.push(line);
     CHAT_PENDING.store(true, Ordering::Release);
+}
+
+/// Очередь чата под замком. Отравленный мьютекс разотравляем: внутри —
+/// список строк, после паники он лишь неполон, а не опасен, и молчащий
+/// навсегда чат хуже потерянной строки.
+fn chat_queue() -> std::sync::MutexGuard<'static, Vec<String>> {
+    CHAT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Поставить в очередь звук квестовой рыбы. Сыграет его игровой поток
@@ -471,10 +640,7 @@ fn play_sound(handles: &Handles) {
 /// Отдаёт накопленные строки чату игры. Только с игрового потока: чат —
 /// её собственный список, и правит его она сама в своём кадре.
 fn flush_chat(handles: &Handles) {
-    let lines: Vec<String> = match CHAT.lock() {
-        Ok(mut queue) => std::mem::take(&mut *queue),
-        Err(_) => return,
-    };
+    let lines: Vec<String> = std::mem::take(&mut *chat_queue());
     CHAT_PENDING.store(false, Ordering::Release);
     let (Some(monitor_field), Some(new_text)) =
         (handles.chat_monitor.as_ref(), handles.new_text.as_ref())
@@ -509,8 +675,14 @@ pub fn cancel_quick_stack() {
 
 /// Снимает зависшую команду: если детур не сработал, `busy()` иначе
 /// останется истинным навсегда и автомат встанет.
+///
+/// Если нажатие уже было выставлено, просим игровой поток его отпустить:
+/// бросать поле нажатым — значит оставлять за собой состояние, которого
+/// мы не заводили.
 pub fn cancel() {
-    COMMAND.store(CMD_NONE, Ordering::Release);
+    if COMMAND.swap(CMD_NONE, Ordering::AcqRel) == CMD_RELEASE {
+        RELEASE.store(true, Ordering::Release);
+    }
     FAILURES.fetch_add(1, Ordering::Relaxed);
 }
 

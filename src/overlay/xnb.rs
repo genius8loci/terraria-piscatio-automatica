@@ -369,6 +369,11 @@ fn pack(
     for (ch, page_index, i) in &located {
         let rect = pages[*page_index].glyphs[*i];
         let (w, h) = (rect[2].max(0) as u32, rect[3].max(0) as u32);
+        // Глиф шире полки писать некуда: копирование ушло бы в соседний ряд
+        // атласа, а на последнем — за границу буфера.
+        if w + GLYPH_GAP * 2 > ATLAS_WIDTH {
+            continue;
+        }
         if pen_x + w + GLYPH_GAP > ATLAS_WIDTH {
             pen_x = GLYPH_GAP;
             pen_y += shelf_h + GLYPH_GAP;

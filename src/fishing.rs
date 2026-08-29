@@ -4,6 +4,7 @@
 //! `Player.ItemCheck` (см. `input`). Точка заброса запоминается по первому
 //! ручному забросу игрока и дальше переиспользуется.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::chat;
@@ -27,11 +28,40 @@ const AFTER_STACK: u64 = 700;
 const STACK_TRIES: u32 = 3;
 /// Сколько ждать применения нажатия, прежде чем считать его потерянным.
 const CLICK_TIMEOUT: Duration = Duration::from_millis(1200);
+/// Как часто перебирать снаряды, когда поплавка нет.
+///
+/// Полный перебор — пара тысяч обращений к CLR, и при пустой воде он шёл
+/// восемь раз в секунду впустую. Торопиться там некуда: после заброса
+/// автомат всё равно выжидает `AFTER_CAST`, а ручной заброс игрока
+/// подождёт треть секунды.
+const IDLE_SCAN: Duration = Duration::from_millis(360);
 /// Как часто перечитывать наживку и слоты. Число свободных ячеек видно
 /// в панели, и раз в пару секунд оно заметно отставало от инвентаря.
 const STOCK_INTERVAL: Duration = Duration::from_millis(300);
 /// Как часто проверять бафы зелий.
 const POTION_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Зачем поставлено нажатие.
+///
+/// Счётчики и сообщения в чат ждут, пока игра его действительно применит.
+/// Раньше и заброс, и подсечка попадали в статистику сразу при постановке
+/// команды: при свёрнутом окне, где не проходило ни одно нажатие, панель
+/// бодро показывала полторы сотни забросов и ни одного улова.
+#[derive(Clone, Copy)]
+enum Pending {
+    Cast { x: i32, y: i32 },
+    Pull { rolled: i32 },
+}
+
+/// Поставленное и ещё не разрешившееся нажатие.
+struct Sent {
+    at: Instant,
+    /// Сколько нажатий игра применила к мгновению постановки. Команда могла
+    /// сняться и сама (детур не поднял хэндлы), поэтому «применилось» —
+    /// это именно рост счётчика, а не просто «перестало быть занято».
+    clicks: u32,
+    what: Pending,
+}
 
 pub struct Fishing {
     /// Экранные координаты первого заброса.
@@ -44,7 +74,9 @@ pub struct Fishing {
     last_bite: i32,
     stopped: Option<String>,
     rng: u32,
-    click_sent: Option<Instant>,
+    click_sent: Option<Sent>,
+    /// Раньше какого мгновения не перебирать снаряды заново, см. `IDLE_SCAN`.
+    next_scan: Instant,
     last_stock: Instant,
     last_potion: Instant,
     warned_no_detour: bool,
@@ -70,6 +102,19 @@ pub struct Fishing {
     pub crates: u32,
 }
 
+/// Зерно для разброса задержек.
+///
+/// С зашитым зерном «разброс» повторялся от запуска к запуску одной и той же
+/// последовательностью — то есть оставался метрономом, просто длинным.
+fn seed() -> u32 {
+    let value = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
+        .unwrap_or(0);
+    // Xorshift не выбирается из нулевого состояния.
+    if value == 0 { 0x9E37_79B9 } else { value }
+}
+
 impl Fishing {
     pub fn new() -> Self {
         Fishing {
@@ -79,8 +124,9 @@ impl Fishing {
             hint: None,
             last_bite: 0,
             stopped: None,
-            rng: 0x9E37_79B9,
+            rng: seed(),
             click_sent: None,
+            next_scan: Instant::now(),
             last_stock: Instant::now() - STOCK_INTERVAL,
             last_potion: Instant::now() - POTION_INTERVAL,
             warned_no_detour: false,
@@ -126,6 +172,17 @@ impl Fishing {
                 self.wait_recast = true;
                 self.stopped = None;
                 self.stack_tries = 0;
+                // Счётчики идут с тем же нуля, что и время: иначе панель
+                // показывала свежие секунды рядом с уловом прошлой сессии.
+                self.casts = 0;
+                self.pulls = 0;
+                self.skips = 0;
+                self.crates = 0;
+                self.bite_total = 0.0;
+                self.bite_count = 0;
+                self.cast_at = None;
+                self.last_bite = 0;
+                state::with(|s| s.stats.potions = 0);
                 log!("рыбалка включена: жду первый заброс вручную");
             }
             (true, Some(start)) => self.session_seconds = start.elapsed().as_secs(),
@@ -166,16 +223,16 @@ impl Fishing {
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 17;
         self.rng ^= self.rng << 5;
-        let span = config
-            .jitter_max_ms
-            .saturating_sub(config.jitter_min_ms)
-            .max(1);
-        let extra = config.jitter_min_ms + (self.rng as u64) % span;
+        // Границы могли приехать из конфига перепутанными: разбираем их
+        // по месту, а не выдаём молча минимум.
+        let lo = config.jitter_min_ms.min(config.jitter_max_ms);
+        let hi = config.jitter_min_ms.max(config.jitter_max_ms);
+        let extra = lo + (self.rng as u64) % (hi - lo + 1);
         Duration::from_millis(base + extra)
     }
 
     /// Ставит нажатие в очередь. Без детура применять его некому.
-    fn click(&mut self, aim: Option<(i32, i32)>) -> bool {
+    fn click(&mut self, aim: Option<(i32, i32)>, what: Pending) -> bool {
         if !detour::is_active() {
             if !self.warned_no_detour {
                 self.warned_no_detour = true;
@@ -183,30 +240,60 @@ impl Fishing {
             }
             return false;
         }
+        // Счётчик снимаем до постановки: игровой поток мог бы успеть
+        // применить нажатие между этими строками, и своё же нажатие
+        // мы бы потом не узнали.
+        let clicks = input::CLICKS.load(Ordering::Relaxed);
         input::request_click(aim);
-        self.click_sent = Some(Instant::now());
+        self.click_sent = Some(Sent {
+            at: Instant::now(),
+            clicks,
+            what,
+        });
         true
     }
 
-    /// Потерянное нажатие снимаем сами, иначе `busy()` навсегда останется
-    /// истинным и автомат встанет.
-    fn drop_stale_click(&mut self) {
-        let Some(sent) = self.click_sent else {
+    /// Разбирает судьбу поставленного нажатия.
+    ///
+    /// Применилось — только здесь растут счётчики и уходит строка в чат.
+    /// Не применилось за отведённое время — снимаем команду сами, иначе
+    /// `busy()` навсегда останется истинным и автомат встанет.
+    fn settle_click(&mut self, game: &Game, config: &Config) {
+        let Some(sent) = self.click_sent.take() else {
             return;
         };
-        if !input::busy() {
-            self.click_sent = None;
+        if input::busy() {
+            if sent.at.elapsed() > CLICK_TIMEOUT {
+                input::cancel();
+                log!("ввод: нажатие не применилось за {CLICK_TIMEOUT:?}, снял команду");
+            } else {
+                self.click_sent = Some(sent);
+            }
             return;
         }
-        if sent.elapsed() > CLICK_TIMEOUT {
-            input::cancel();
-            self.click_sent = None;
-            log!("ввод: нажатие не применилось за {CLICK_TIMEOUT:?}, снял команду");
+        if input::CLICKS.load(Ordering::Relaxed) == sent.clicks {
+            log!("ввод: команда снялась, не применившись");
+            return;
+        }
+        match sent.what {
+            Pending::Cast { x, y } => {
+                self.casts += 1;
+                log!("заброс #{} в точку {x},{y}", self.casts);
+            }
+            Pending::Pull { rolled } => {
+                self.pulls += 1;
+                // Что именно ящик, знает игра: `ItemID.Sets.IsFishingCrate`.
+                if game.is_crate(rolled) {
+                    self.crates += 1;
+                }
+                log!("подсечка #{}: улов {rolled}", self.pulls);
+                self.announce(game, config, rolled, true);
+            }
         }
     }
 
     pub fn tick(&mut self, game: &Game, config: &Config) {
-        self.drop_stale_click();
+        self.settle_click(game, config);
         self.track_session();
         self.check_rod(game);
 
@@ -219,9 +306,20 @@ impl Fishing {
             self.drink_potions(game, config);
         }
 
-        let step = crash::Step::worker(crash::STEP_BOBBER);
-        let bobber = game.find_bobber(self.hint);
-        drop(step);
+        // Пока поплавка нет, полный перебор снарядов держим на поводке:
+        // он стоит тысяч обращений к CLR, а нового поплавка раньше времени
+        // всё равно не появится.
+        let bobber = if self.hint.is_none() && Instant::now() < self.next_scan {
+            Ok(None)
+        } else {
+            let step = crash::Step::worker(crash::STEP_BOBBER);
+            let found = game.find_bobber(self.hint);
+            drop(step);
+            if matches!(found, Ok(None)) {
+                self.next_scan = Instant::now() + IDLE_SCAN;
+            }
+            found
+        };
         match bobber {
             Ok(Some(bobber)) => {
                 self.hint = Some(bobber.index);
@@ -384,10 +482,10 @@ impl Fishing {
             return;
         }
         let _step = crash::Step::worker(crash::STEP_BITE);
-        self.last_bite = rolled;
 
         // Замер делаем на первом же обнаружении поклёвки, независимо от того,
-        // будем подсекать или нет: ждали-то мы её в любом случае.
+        // будем подсекать или нет: ждали-то мы её в любом случае. `take()`
+        // сам по себе однократен, так что повтор замера не грозит.
         if let Some(cast) = self.cast_at.take() {
             self.bite_total += cast.elapsed().as_secs_f32();
             self.bite_count += 1;
@@ -395,29 +493,28 @@ impl Fishing {
 
         let take = state::with(|s| s.should_pull(rolled)).unwrap_or(true);
         if !take {
+            self.last_bite = rolled;
             self.skips += 1;
             log!("пропуск: улов {rolled} не проходит фильтр, наживка не тратится");
             self.announce(game, config, rolled, false);
             return;
         }
         if !self.enabled() {
+            self.last_bite = rolled;
             log!("поклёвка: улов {rolled} прошёл бы фильтр, но рыбалка выключена");
             return;
         }
+        // Заняты или ещё не вышла пауза — поклёвку **не** помечаем разобранной:
+        // окно подсечки открыто, попробуем на следующем тике. Раньше отметка
+        // ставилась выше, и такая рыба пропадала совсем — до конца окна к ней
+        // больше не возвращались.
         if input::busy() || Instant::now() < self.next_action {
             return;
         }
-
-        if !self.click(None) {
+        if !self.click(None, Pending::Pull { rolled }) {
             return;
         }
-        self.pulls += 1;
-        // Что именно ящик, знает игра: `ItemID.Sets.IsFishingCrate`.
-        if game.is_crate(rolled) {
-            self.crates += 1;
-        }
-        log!("подсечка #{}: улов {rolled}", self.pulls);
-        self.announce(game, config, rolled, true);
+        self.last_bite = rolled;
         let pause = self.jitter(config, AFTER_PULL);
         self.next_action = Instant::now() + pause;
     }
@@ -521,11 +618,13 @@ impl Fishing {
         }
         self.stack_tries = 0;
 
-        if !self.click(Some(aim)) {
+        let cast = Pending::Cast { x: aim.0, y: aim.1 };
+        if !self.click(Some(aim), cast) {
             return;
         }
-        self.casts += 1;
-        log!("заброс #{} в точку {},{}", self.casts, aim.0, aim.1);
+        // Поплавок появится в ближайшем тике — перебор снарядов больше
+        // не придерживаем.
+        self.next_scan = Instant::now();
         let pause = self.jitter(config, AFTER_CAST);
         self.next_action = Instant::now() + pause;
     }

@@ -31,7 +31,6 @@ impl Mark {
 /// Что игра рассказала про предмет: имя в двух видах и признак квестовой
 /// рыбы. Поиску нужен нижний регистр, чату — как показывает игра.
 pub struct ItemFacts {
-    pub id: i32,
     pub search: String,
     pub display: String,
     pub quest: bool,
@@ -90,7 +89,11 @@ pub struct Shared {
     pub fishable: Vec<i32>,
     /// Что игра знает про эти предметы. Спрашивается один раз при
     /// подключении, на рабочем потоке.
-    pub names: Vec<ItemFacts>,
+    ///
+    /// Таблица, а не список: поиск в фильтре спрашивает про каждый из ста
+    /// с лишним предметов на каждом кадре, и перебором это выходило
+    /// квадратично прямо в отрисовке.
+    pub names: HashMap<i32, ItemFacts>,
     pub status: Status,
     pub stats: Stats,
     /// UI что-то переключил — рабочему потоку надо сохранить конфиг.
@@ -108,7 +111,7 @@ impl Default for Shared {
             potions: [true, false, true],
             filter: HashMap::new(),
             fishable: Vec::new(),
-            names: Vec::new(),
+            names: HashMap::new(),
             status: Status::default(),
             stats: Stats::default(),
             dirty: false,
@@ -119,7 +122,7 @@ impl Default for Shared {
 impl Shared {
     /// Что известно про предмет. `None` — игра о нём не рассказывала.
     pub fn facts(&self, item: i32) -> Option<&ItemFacts> {
-        self.names.iter().find(|f| f.id == item)
+        self.names.get(&item)
     }
 
     /// Решение по улову с учётом режима списка и отметки предмета.
@@ -141,7 +144,17 @@ impl Shared {
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
 
 /// Короткий доступ под мьютексом.
+///
+/// Отравленный мьютекс разотравляем: внутри — переключатели и показания
+/// игры, после паники они лишь неполны. Отказ же брать замок означал бы,
+/// что панель навсегда уходит в значения по умолчанию — с выключенной
+/// рыбалкой и пустым фильтром, — и понять почему было бы нечем.
+///
+/// Возвращаемый `Option` оставлен ради вызывающих: он больше не может быть
+/// `None`, но и переписывать полсотни мест ради этого незачем.
 pub fn with<R>(f: impl FnOnce(&mut Shared) -> R) -> Option<R> {
-    let mut guard = SHARED.lock().ok()?;
+    let mut guard = SHARED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Some(f(guard.get_or_insert_with(Shared::default)))
 }
