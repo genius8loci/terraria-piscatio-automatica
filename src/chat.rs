@@ -70,6 +70,18 @@ pub fn spawn(config: &Config, name: &str, hooked: bool) {
     input::queue_chat(line(&config.chat_color_spawn, t.chat_spawn, &body));
 }
 
+/// Поплавок так и не долетел до воды — автомат сдался.
+///
+/// Без предмета в строке: сообщать не о чём, кроме самой остановки.
+pub fn flight_lost(config: &Config, tries: u32) {
+    if !config.chat_messages {
+        return;
+    }
+    let t = lang::t();
+    let body = lang::fill(t.chat_flight_lost, &[&tries.to_string()]);
+    input::queue_chat(line(&config.chat_color_info, t.chat_info, &body));
+}
+
 /// Автопитьё долило баф.
 pub fn potion_used(config: &Config, id: i32, name: &str) {
     if !config.chat_messages {

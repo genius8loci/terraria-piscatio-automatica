@@ -35,6 +35,15 @@ const CLICK_TIMEOUT: Duration = Duration::from_millis(1200);
 /// автомат всё равно выжидает `AFTER_CAST`, а ручной заброс игрока
 /// подождёт треть секунды.
 const IDLE_SCAN: Duration = Duration::from_millis(360);
+/// Сколько ждём, пока заброшенный поплавок коснётся воды.
+///
+/// Обычный заброс укладывается в секунду-полторы. Пятнадцать секунд в полёте
+/// означают, что он никуда не долетит: упал на землю, застрял в стене или
+/// точка заброса вообще мимо воды. Раньше автомат в этом случае ждал поклёвки
+/// вечно.
+const FLIGHT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Сколько раз перезабрасываем застрявший поплавок, прежде чем сдаться.
+const FLIGHT_TRIES: u32 = 3;
 /// Как часто перечитывать наживку и слоты. Число свободных ячеек видно
 /// в панели, и раз в пару секунд оно заметно отставало от инвентаря.
 const STOCK_INTERVAL: Duration = Duration::from_millis(300);
@@ -49,8 +58,25 @@ const POTION_INTERVAL: Duration = Duration::from_secs(3);
 /// бодро показывала полторы сотни забросов и ни одного улова.
 #[derive(Clone, Copy)]
 enum Pending {
-    Cast { x: i32, y: i32 },
-    Pull { rolled: i32 },
+    Cast {
+        x: i32,
+        y: i32,
+    },
+    Pull {
+        rolled: i32,
+    },
+    /// Снятие застрявшего в полёте поплавка.
+    ///
+    /// Именно снятие, а не перезаброс: `ItemCheck_PullFishingBobbers`
+    /// возвращает `false`, пока у игрока есть живой поплавок, так что новый
+    /// снаряд не создастся. Зато то же нажатие ставит поплавку `ai[0] = 1f`,
+    /// и он летит обратно к игроку, а при касании `Kill()`-ится. Освободив
+    /// воду, следующий тик забросит заново обычным путём.
+    ///
+    /// Наживка не тратится: она списывается только при настоящей поклёвке.
+    /// В счётчик забросов это тоже не идёт — иначе статистика раздувалась бы
+    /// на неудачах.
+    Recast,
 }
 
 /// Поставленное и ещё не разрешившееся нажатие.
@@ -77,6 +103,10 @@ pub struct Fishing {
     click_sent: Option<Sent>,
     /// Раньше какого мгновения не перебирать снаряды заново, см. `IDLE_SCAN`.
     next_scan: Instant,
+    /// Когда поплавок ушёл в полёт и всё ещё не коснулся воды.
+    flying_since: Option<Instant>,
+    /// Сколько раз подряд поплавок не долетел до воды.
+    flight_tries: u32,
     last_stock: Instant,
     last_potion: Instant,
     warned_no_detour: bool,
@@ -127,6 +157,8 @@ impl Fishing {
             rng: seed(),
             click_sent: None,
             next_scan: Instant::now(),
+            flying_since: None,
+            flight_tries: 0,
             last_stock: Instant::now() - STOCK_INTERVAL,
             last_potion: Instant::now() - POTION_INTERVAL,
             warned_no_detour: false,
@@ -182,6 +214,8 @@ impl Fishing {
                 self.bite_count = 0;
                 self.cast_at = None;
                 self.last_bite = 0;
+                self.flying_since = None;
+                self.flight_tries = 0;
                 state::with(|s| s.stats.potions = 0);
                 log!("рыбалка включена: жду первый заброс вручную");
             }
@@ -289,6 +323,10 @@ impl Fishing {
                 log!("подсечка #{}: улов {rolled}", self.pulls);
                 self.announce(game, config, rolled, true);
             }
+            Pending::Recast => log!(
+                "снял застрявший поплавок, попытка {}/{FLIGHT_TRIES}",
+                self.flight_tries
+            ),
         }
     }
 
@@ -331,6 +369,16 @@ impl Fishing {
                 state::with(|s| s.status.bobber = where_is);
                 self.remember_aim(game);
 
+                if bobber.wet {
+                    // Долетел — счётчик застреваний обнуляем: считаем только
+                    // неудачи подряд.
+                    self.flying_since = None;
+                    self.flight_tries = 0;
+                } else {
+                    self.flying_since.get_or_insert_with(Instant::now);
+                    self.check_flight(config);
+                }
+
                 if bobber.has_bite() {
                     self.on_bite(game, config, bobber.rolled());
                 } else {
@@ -342,6 +390,9 @@ impl Fishing {
             }
             Ok(None) => {
                 self.hint = None;
+                // Поплавка нет — лететь нечему. Счётчик неудач при этом
+                // не трогаем: он сбрасывается только успехом, то есть водой.
+                self.flying_since = None;
                 // Воды без поплавка достаточно: следующий, который в ней
                 // появится, заброшен уже при включённой рыбалке, и курсор
                 // в это мгновение стоит там, куда игрок целился.
@@ -397,6 +448,63 @@ impl Fishing {
             }
             Err(e) => log!("рыбалка: предмет в руке прочитать не удалось: {e}"),
         }
+    }
+
+    /// Поплавок висит в полёте слишком долго — перезабрасываем, а после
+    /// нескольких неудач останавливаемся.
+    ///
+    /// Так бывает, когда точка заброса мимо воды: поплавок падает на землю
+    /// и остаётся там навсегда — `AI_061_FishingBobber` каждый кадр
+    /// переставляет ему `timeLeft = 60`, пока удочка в руке. Раньше автомат
+    /// в этом случае ждал поклёвки до скончания века и молчал.
+    ///
+    /// Нажатие здесь не забрасывает, а снимает застрявший поплавок — см.
+    /// `Pending::Recast`. Воду это освобождает, и следующий тик забросит
+    /// заново обычным путём.
+    ///
+    /// Если поля `Projectile.wet` в сборке игры не нашлось, поплавок всегда
+    /// считается долетевшим (см. `game::read_bobber`), и сюда мы просто
+    /// никогда не попадём.
+    fn check_flight(&mut self, config: &Config) {
+        if !self.enabled() || self.stopped.is_some() {
+            return;
+        }
+        let Some(aim) = self.aim else {
+            return;
+        };
+        let Some(since) = self.flying_since else {
+            return;
+        };
+        if since.elapsed() < FLIGHT_TIMEOUT {
+            return;
+        }
+        // Ждём, пока разрешится прошлое нажатие: иначе на каждом тике
+        // ставили бы новое поверх неприменённого.
+        if input::busy() || Instant::now() < self.next_action {
+            return;
+        }
+
+        self.flight_tries += 1;
+        if self.flight_tries > FLIGHT_TRIES {
+            self.stopped = Some("поплавок не долетает до воды".to_string());
+            log!(
+                "рыбалка остановлена: поплавок не достиг воды за {FLIGHT_TRIES} \
+                 попыток, точка заброса {},{} — похоже, мимо воды",
+                aim.0,
+                aim.1
+            );
+            chat::flight_lost(config, FLIGHT_TRIES);
+            return;
+        }
+
+        // Отсчёт начинаем заново: следующей попытке отводится столько же.
+        self.flying_since = Some(Instant::now());
+        if !self.click(Some(aim), Pending::Recast) {
+            return;
+        }
+        self.next_scan = Instant::now();
+        let pause = self.jitter(config, AFTER_CAST);
+        self.next_action = Instant::now() + pause;
     }
 
     /// Первый заброс делает игрок — оттуда и берём точку прицела.

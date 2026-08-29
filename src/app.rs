@@ -111,10 +111,6 @@ pub fn run(dll_dir: PathBuf) {
     let mut attempts: u32 = 0;
     let mut next_attach = Instant::now();
     let mut gave_up = false;
-    // Каким `Main.ThrottleWhenInactive` был до нас — вернём его при выгрузке.
-    // Иначе наша правка уезжает в `config.json` игры (она сохраняет это поле
-    // при выходе) и разгоняет мир при сворачивании уже без всякой DLL.
-    let mut throttle_was: Option<bool> = None;
     // Список ловимого: одной попытки на подключении мало, см. `load_fishable`.
     let mut fishable_ready = false;
     let mut fishable_tries: u32 = 0;
@@ -194,20 +190,8 @@ pub fn run(dll_dir: PathBuf) {
                             None => "неизвестна".to_string(),
                         }
                     );
-                    // Порядок важен: сон свёрнутой игры снимает `apply_settings`,
-                    // а держит её после этого выдержка тиков — она живёт
-                    // в детуре. Снять сон, не поставив детур, значит оставить
-                    // игру вообще без ограничителя скорости.
                     let ready = install_detour(&attached);
                     state::with(|s| s.status.detour_ready = ready);
-                    if ready {
-                        throttle_was = apply_settings(&attached, &config);
-                    } else {
-                        log!(
-                            "детур не встал — сон свёрнутой игры не трогаю: \
-                             держать её скорость было бы нечем"
-                        );
-                    }
                     if config.cursor_detour {
                         install_cursor_detour(&attached);
                     } else {
@@ -302,15 +286,6 @@ pub fn run(dll_dir: PathBuf) {
         }
 
         std::thread::sleep(POLL_INTERVAL);
-    }
-
-    // Возвращаем игре её собственную настройку: она сохранит её в свой
-    // `config.json`, и без нас свёрнутая игра снова будет спать, как задумано.
-    if let (Some(attached), Some(was)) = (game.as_ref(), throttle_was) {
-        match attached.set_inactive_throttle(was) {
-            Ok(()) => log!("ThrottleWhenInactive возвращён в {was}"),
-            Err(e) => log!("вернуть ThrottleWhenInactive не вышло: {e}"),
-        }
     }
 
     log!("рабочий поток остановлен");
@@ -478,31 +453,22 @@ fn install_cursor_detour(game: &Game) {
     }
 }
 
-/// Снимает сон свёрнутой игры и возвращает прежнее значение, чтобы при
-/// выгрузке вернуть всё как было.
-///
-/// Скорость свёрнутой игры после этого держит не она, а мы: `input::pace`
-/// выдерживает 60 тиков в секунду. Без выдержки снятый сон разгонял мир
-/// в сорок раз — сутки за полминуты.
-fn apply_settings(game: &Game, config: &Config) -> Option<bool> {
-    if !config.disable_inactive_throttle {
-        return None;
-    }
-    let was = match game.inactive_throttle() {
-        Ok(v) => v,
-        Err(e) => {
-            log!("троттлинг прочитать не вышло, трогать его не буду: {e}");
-            return None;
-        }
-    };
-    match game.set_inactive_throttle(false) {
-        Ok(()) => {
-            log!("ThrottleWhenInactive снят (был {was}) — выдержку тиков держим сами");
-            Some(was)
-        }
-        Err(e) => {
-            log!("не удалось снять троттлинг: {e}");
-            None
-        }
-    }
-}
+// Настройки игры мы больше не трогаем вовсе.
+//
+// Раньше здесь снимался `Main.ThrottleWhenInactive`: считалось, что иначе
+// свёрнутая игра спит по 20 мс на кадр и рыбалка ползёт. По декомпиляции
+// выяснилось, что это неверно и что правка была прямо вредной.
+//
+// В `Main.DoUpdate` поле управляет не сном, а шагом времени:
+//
+//     base.IsFixedTimeStep = ThrottleWhenInactive && !base.IsActive;
+//     base.InactiveSleepTime = ThrottleWhenInactive ? 20 мс : TimeSpan.Zero;
+//
+// То есть игра сама переходит на фиксированный шаг, когда теряет фокус, —
+// именно чтобы мир не убегал. Снимая поле, мы этот переход отключали, и цикл
+// разгонялся до тысяч тиков в секунду (замерено 2408 против 60).
+//
+// А сон в 20 мс симуляцию не замедляет: в `Game.Tick` XNA сначала спит,
+// потом делит накопленное время на `targetElapsedTime` и прогоняет столько
+// `Update`, сколько накопилось. Выходит ровно 60 обновлений в секунду,
+// падает только частота кадров — а у свёрнутой игры кадров нет вовсе.

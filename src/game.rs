@@ -57,9 +57,6 @@ pub struct Game {
     f_my_player: Field,
     f_player: Field,
     f_projectile: Field,
-    /// `Main.ThrottleWhenInactive`. Необязательно: без него просто не станем
-    /// трогать сон свёрнутой игры — своя выдержка тиков есть в `input`.
-    f_throttle: Option<Field>,
     /// `Main.drawingPlayerChat` — открыт ли чат игры. По нему хоткеи молчат:
     /// иначе стрелки листали бы историю чата и заодно дёргали панель,
     /// а Delete при правке строки выгружал бы DLL.
@@ -184,7 +181,6 @@ impl Game {
             f_my_player: main.field("myPlayer")?,
             f_player: main.field("player")?,
             f_projectile: main.field("projectile")?,
-            f_throttle: main.field("ThrottleWhenInactive").ok(),
             f_chat_open: main.field("drawingPlayerChat").ok(),
             f_net_mode: main.field("netMode").ok(),
             f_version: main.field("versionNumber").ok(),
@@ -252,29 +248,6 @@ impl Game {
             return Ok(None);
         }
         Ok(Some(player))
-    }
-
-    /// Снимает сон игры при потере фокуса.
-    ///
-    /// Сам по себе он безобиден, но у свёрнутой игры это **единственный**
-    /// ограничитель: кадры не рисуются, значит и вертикальной синхронизации
-    /// в `Present` нет, а при `FrameSkipMode != 0` шаг цикла не фиксирован.
-    /// Снятый сон разгоняет мир в десятки раз, поэтому вместе с этим вызовом
-    /// обязана работать своя выдержка тиков — см. `input::pace_inactive`.
-    pub fn set_inactive_throttle(&self, enabled: bool) -> Result<()> {
-        let field = self
-            .f_throttle
-            .as_ref()
-            .ok_or_else(|| err("поля Main.ThrottleWhenInactive нет"))?;
-        field.set_static(Var::boolean(enabled))
-    }
-
-    pub fn inactive_throttle(&self) -> Result<bool> {
-        let field = self
-            .f_throttle
-            .as_ref()
-            .ok_or_else(|| err("поля Main.ThrottleWhenInactive нет"))?;
-        Ok(field.get_static()?.as_bool().unwrap_or(true))
     }
 
     /// Одиночная ли игра. Поля нет — отвечаем «нет»: в сомнительном случае

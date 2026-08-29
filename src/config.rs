@@ -36,12 +36,6 @@ pub struct Config {
     /// с конкретной сборкой игры.
     pub cursor_detour: bool,
 
-    /// Снять сон игры при потере фокуса (`Main.ThrottleWhenInactive = false`).
-    /// Без этого свёрнутая игра спит по 20 мс на тик; со снятым сном скорость
-    /// держит своя выдержка в `input::pace`, иначе мир разгоняется в десятки
-    /// раз. При выгрузке прежнее значение возвращается игре.
-    pub disable_inactive_throttle: bool,
-
     /// Разброс задержек перед забросом и подсечкой, мс.
     pub jitter_min_ms: u64,
     pub jitter_max_ms: u64,
@@ -67,6 +61,8 @@ pub struct Config {
     pub chat_color_quest: String,
     pub chat_color_spawn: String,
     pub chat_color_potion: String,
+    /// Служебные сообщения автомата: например, что рыбалка остановлена.
+    pub chat_color_info: String,
 }
 
 /// Приводит цвет из конфига к шести шестнадцатеричным цифрам, как ждёт
@@ -96,7 +92,6 @@ impl Default for Config {
             pull_enemy_spawns: false,
             quick_stack_when_full: true,
             cursor_detour: true,
-            disable_inactive_throttle: true,
             jitter_min_ms: 120,
             jitter_max_ms: 480,
             auto_potions: false,
@@ -113,6 +108,9 @@ impl Default for Config {
             chat_color_quest: "FFD700".to_string(),
             chat_color_spawn: "FF4040".to_string(),
             chat_color_potion: "D2A0FF".to_string(),
+            // Голубой из палитры редкости — им игра красит имена предметов
+            // первого уровня, и рядом с остальными ярлыками он читается.
+            chat_color_info: "9696FF".to_string(),
         }
     }
 }
@@ -192,13 +190,6 @@ impl Config {
              # тогда она уйдёт в Present и окажется поверх курсора.\n\
              cursor_detour = {cursor_detour}\n\
              \n\
-             # Снять сон игры при потере фокуса (Main.ThrottleWhenInactive).\n\
-             # Без этого свёрнутая игра спит по 20 мс на тик и рыбалка идёт\n\
-             # медленнее. Скорость при снятом сне держим сами — ровно 60 тиков\n\
-             # в секунду, как у игры; выключать эту строку нужно только если\n\
-             # своя выдержка почему-то мешает.\n\
-             disable_inactive_throttle = {disable_inactive_throttle}\n\
-             \n\
              # Разброс задержек перед забросом и подсечкой, миллисекунды.\n\
              # Нужен, чтобы действия не шли метрономом.\n\
              jitter_min_ms = {jitter_min_ms}\n\
@@ -230,14 +221,14 @@ impl Config {
              chat_color_whitelist = \"{chat_color_whitelist}\"  # пропуск по белому списку\n\
              chat_color_quest = \"{chat_color_quest}\"      # квестовая рыба рыбака\n\
              chat_color_spawn = \"{chat_color_spawn}\"      # вражеский спавн\n\
-             chat_color_potion = \"{chat_color_potion}\"     # автопитьё зелья\n",
+             chat_color_potion = \"{chat_color_potion}\"     # автопитьё зелья\n\
+             chat_color_info = \"{chat_color_info}\"       # служебные сообщения автомата\n",
             mode = mode,
             blacklist = int_list(&self.blacklist),
             whitelist = int_list(&self.whitelist),
             pull_enemy_spawns = self.pull_enemy_spawns,
             quick_stack_when_full = self.quick_stack_when_full,
             cursor_detour = self.cursor_detour,
-            disable_inactive_throttle = self.disable_inactive_throttle,
             jitter_min_ms = self.jitter_min_ms,
             jitter_max_ms = self.jitter_max_ms,
             auto_potions = self.auto_potions,
@@ -251,6 +242,7 @@ impl Config {
             chat_color_quest = self.chat_color_quest,
             chat_color_spawn = self.chat_color_spawn,
             chat_color_potion = self.chat_color_potion,
+            chat_color_info = self.chat_color_info,
         )
     }
 }

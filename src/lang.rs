@@ -91,6 +91,9 @@ pub struct Strings {
     pub chat_quest: &'static str,
     pub chat_spawn: &'static str,
     pub chat_potion: &'static str,
+    pub chat_info: &'static str,
+    /// С одним `{}` — сколько попыток перезаброса сделали.
+    pub chat_flight_lost: &'static str,
     /// Все четыре — с одним `{}` под имя и иконку предмета.
     pub chat_item_skipped: &'static str,
     pub chat_quest_caught: &'static str,
@@ -150,6 +153,8 @@ pub static RU: Strings = Strings {
     chat_quest: "Квест рыбака",
     chat_spawn: "Спавн",
     chat_potion: "Зелье",
+    chat_info: "Инфо",
+    chat_flight_lost: "поплавок не достиг воды после {} попыток, авторыбалка остановлена",
     chat_item_skipped: "пропущен предмет {}",
     chat_quest_caught: "поймана квестовая рыба {}",
     chat_spawn_skipped: "пропущен спавн {}",
@@ -192,6 +197,8 @@ pub static EN: Strings = Strings {
     chat_quest: "Angler quest",
     chat_spawn: "Spawn",
     chat_potion: "Potion",
+    chat_info: "Info",
+    chat_flight_lost: "the bobber never reached water after {} tries, auto-fishing stopped",
     chat_item_skipped: "skipped {}",
     chat_quest_caught: "caught the quest fish {}",
     chat_spawn_skipped: "skipped the spawn {}",
