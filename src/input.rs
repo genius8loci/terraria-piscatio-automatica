@@ -41,9 +41,17 @@ static QUICK_STACK: AtomicBool = AtomicBool::new(false);
 /// Признак отдельно, чтобы в простое не брать мьютекс каждый кадр.
 static CHAT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static CHAT_PENDING: AtomicBool = AtomicBool::new(false);
-/// Заявка «сыграть звук квестовой рыбы». Один флаг, а не счётчик: если
-/// две рыбы попались подряд, второй звук поверх первого всё равно не нужен.
-static SOUND: AtomicBool = AtomicBool::new(false);
+/// Заявки на звуки, битами `SOUND_*`. Не счётчик: если два одинаковых
+/// повода случились подряд, второй звук поверх первого всё равно не нужен.
+static SOUND: AtomicU8 = AtomicU8::new(0);
+
+/// Квестовая рыба — тот же звук, что у лучшей перековки (`SoundID.BestReforge`).
+/// Это `LegacySoundStyle`, поэтому id и вариант из него ещё надо достать.
+pub const SOUND_QUEST: u8 = 1;
+/// Наведение и нажатие на кнопку панели: `SoundID.MenuTick` (12).
+pub const SOUND_TICK: u8 = 2;
+/// Служебное сообщение автомата в чат: `SoundID.Chat` (24).
+pub const SOUND_CHAT: u8 = 4;
 /// Сколько строк держим, если игровой поток почему-то их не разбирает.
 const CHAT_LIMIT: usize = 32;
 /// Экранные координаты прицела; -1 — не трогать курсор.
@@ -454,12 +462,12 @@ pub fn on_item_check(this: *mut c_void) {
 /// с общими буферами после отрисовки — не проверено. Идёт единицами
 /// в минуту, так что осталась в детуре.
 pub fn on_present() {
-    if !CHAT_PENDING.load(Ordering::Acquire) && !SOUND.load(Ordering::Acquire) {
+    if !CHAT_PENDING.load(Ordering::Acquire) && SOUND.load(Ordering::Acquire) == 0 {
         return;
     }
     let Some(handles) = handles() else {
         CHAT_PENDING.store(false, Ordering::Release);
-        SOUND.store(false, Ordering::Release);
+        SOUND.store(0, Ordering::Release);
         chat_queue().clear();
         return;
     };
@@ -467,9 +475,10 @@ pub fn on_present() {
         let _step = crash::Step::game(crash::STEP_CHAT);
         flush_chat(handles);
     }
-    if SOUND.swap(false, Ordering::AcqRel) {
+    let wanted = SOUND.swap(0, Ordering::AcqRel);
+    if wanted != 0 {
         let _step = crash::Step::game(crash::STEP_SOUND);
-        play_sound(handles);
+        play_sound(handles, wanted);
     }
 }
 
@@ -792,45 +801,66 @@ fn chat_queue() -> std::sync::MutexGuard<'static, Vec<String>> {
 
 /// Поставить в очередь звук квестовой рыбы. Сыграет его игровой поток
 /// в ближайшем кадре, см. `play_sound`.
-pub fn request_sound() {
-    SOUND.store(true, Ordering::Release);
+pub fn request_sound(kind: u8) {
+    SOUND.fetch_or(kind, Ordering::Release);
 }
 
 /// Играет короткий звук руками игры — чтобы он слушался её громкости
 /// и глушился вместе с остальным звуком. Только с игрового потока.
-fn play_sound(handles: &Handles) {
+fn play_sound(handles: &Handles, wanted: u8) {
     let Some(api) = handles.sound.as_ref() else {
         return;
     };
-    let (Ok(style), Ok(player)) = (api.style.get_static(), api.player.get_static()) else {
+    let Ok(player) = api.player.get_static() else {
         return;
     };
-    if style.is_null() || player.is_null() {
+    if player.is_null() {
         return;
     }
-    let Some(id) = api.style_id.get(&style).ok().and_then(|v| v.as_int()) else {
-        return;
-    };
-    let variant = api
-        .style_variant
-        .invoke(&style, &[])
-        .ok()
-        .and_then(|v| v.as_int())
-        .unwrap_or(1);
+
     // Координаты -1 означают «без привязки к месту»: звук звучит ровно так,
     // как интерфейсный, а не из точки в мире.
-    let _ = api.play.invoke(
-        &player,
-        &[
-            Var::int(id),
-            Var::int(-1),
-            Var::int(-1),
-            Var::int(variant),
-            Var::float(1.0),
-            Var::float(0.0),
-        ],
-    );
+    let play = |id: i32, variant: i32| {
+        let _ = api.play.invoke(
+            &player,
+            &[
+                Var::int(id),
+                Var::int(-1),
+                Var::int(-1),
+                Var::int(variant),
+                Var::float(1.0),
+                Var::float(0.0),
+            ],
+        );
+    };
+
+    if wanted & SOUND_QUEST != 0
+        && let Ok(style) = api.style.get_static()
+        && !style.is_null()
+        && let Some(id) = api.style_id.get(&style).ok().and_then(|v| v.as_int())
+    {
+        let variant = api
+            .style_variant
+            .invoke(&style, &[])
+            .ok()
+            .and_then(|v| v.as_int())
+            .unwrap_or(1);
+        play(id, variant);
+    }
+    // У этих двух звук одиночный: игра держит его отдельным полем и вариант
+    // при воспроизведении не смотрит вовсе, так что передаём единицу.
+    if wanted & SOUND_TICK != 0 {
+        play(SOUND_ID_MENU_TICK, 1);
+    }
+    if wanted & SOUND_CHAT != 0 {
+        play(SOUND_ID_CHAT, 1);
+    }
 }
+
+/// `SoundID.MenuTick` — щелчок при наведении и нажатии в меню игры.
+const SOUND_ID_MENU_TICK: i32 = 12;
+/// `SoundID.Chat` — звук появления строки в чате.
+const SOUND_ID_CHAT: i32 = 24;
 
 /// Отдаёт накопленные строки чату игры. Только с игрового потока: чат —
 /// её собственный список, и правит его она сама в своём кадре.

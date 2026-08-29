@@ -705,7 +705,7 @@ impl Fishing {
             chat::quest_caught(config, rolled, &name);
             // Квестовая рыба попадается редко, и её легко проглядеть в чате.
             // Звук играет сама игра, чтобы он слушался её громкости.
-            input::request_sound();
+            input::request_sound(input::SOUND_QUEST);
         }
     }
 

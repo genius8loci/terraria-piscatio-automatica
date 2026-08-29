@@ -147,6 +147,9 @@ pub struct UiState {
     /// Что набрано в строке поиска, и стоит ли в ней курсор.
     pub search: String,
     pub search_focus: bool,
+    /// Кнопка, над которой курсор стоял в прошлом кадре, — по смене
+    /// проигрывается щелчок наведения.
+    pub hovered: Option<Rect>,
 }
 
 impl Default for UiState {
@@ -158,6 +161,7 @@ impl Default for UiState {
             drag: None,
             search: String::new(),
             search_focus: false,
+            hovered: None,
         }
     }
 }
@@ -206,8 +210,8 @@ pub struct Frame {
     pub typing: bool,
 }
 
-#[derive(Clone, Copy)]
-struct Rect {
+#[derive(Clone, Copy, PartialEq)]
+pub struct Rect {
     x: f32,
     y: f32,
     w: f32,
@@ -234,6 +238,15 @@ pub struct Layout<'a, 'b> {
     pub hint: u8,
     /// В этом кадре кликнули по строке поиска. Клик мимо неё снимает фокус.
     pub clicked_search: bool,
+    /// Кнопка под курсором в этом кадре, если она там есть.
+    ///
+    /// Опознаём кнопку по её прямоугольнику, а не по номеру: раскладка
+    /// считается заново каждый кадр, но детерминированно, так что у одной
+    /// и той же кнопки прямоугольник от кадра к кадру совпадает. Смена
+    /// прямоугольника — значит курсор переехал на другую кнопку, и пора
+    /// щёлкнуть. Ячейки предметов сюда не попадают: сто двадцать восемь
+    /// щелчков при проводке мышью по сетке — это не подсказка, а треск.
+    pub hovered: Option<Rect>,
 }
 
 impl<'a, 'b> Layout<'a, 'b> {
@@ -250,6 +263,22 @@ impl<'a, 'b> Layout<'a, 'b> {
         }
         self.input.clicked = false;
         true
+    }
+
+    /// То же, но для кнопки: отмечает наведение и щёлкает при нажатии.
+    ///
+    /// Звук тот же, каким игра отзывается на свои кнопки меню
+    /// (`SoundID.MenuTick`), и играет его она сама — значит он слушается
+    /// её громкости и глушится вместе с остальным звуком.
+    fn hit_button(&mut self, r: Rect) -> bool {
+        if self.hovered(r) {
+            self.hovered = Some(r);
+        }
+        let clicked = self.hit(r);
+        if clicked {
+            crate::input::request_sound(crate::input::SOUND_TICK);
+        }
+        clicked
     }
 
     fn hovered(&self, r: Rect) -> bool {
@@ -375,7 +404,7 @@ impl<'a, 'b> Layout<'a, 'b> {
     /// Место под кнопку квадратное, а картинка в него вписывается со своими
     /// пропорциями: у сундука 32x30, у звёздочки и катушки квадрат.
     fn toggle(&mut self, place: Rect, knob: Knob, on: bool) -> bool {
-        let clicked = self.hit(place);
+        let clicked = self.hit_button(place);
         // Кадры включённой картинки лежат в атласе подряд, поэтому нужный
         // выбирается вычитанием. Счёт идёт по кадрам отрисовки — они же
         // тики игры, так что скорость выходит ровно как в инвентаре.
@@ -477,7 +506,7 @@ impl<'a, 'b> Layout<'a, 'b> {
     /// скруглён заметно мельче, и рядом с окном кнопка на нём смотрелась
     /// чужой. Разница только в заливке — по ней и видно состояние.
     fn button(&mut self, r: Rect, label: &str, active: bool) -> bool {
-        let clicked = self.hit(r);
+        let clicked = self.hit_button(r);
         let fill = if active {
             colors::BUTTON_ACTIVE
         } else if self.hovered(r) {
@@ -531,6 +560,7 @@ pub fn build(
         hover_item: 0,
         hint: HINT_NONE,
         clicked_search: false,
+        hovered: None,
     };
 
     // Ширину задаёт содержимое: самая длинная подпись или заголовок из
@@ -895,6 +925,14 @@ pub fn build(
     // Курсор в строке поиска имеет смысл только при открытом фильтре.
     if ui.tab != Tab::Filter {
         ui.search_focus = false;
+    }
+    // Курсор переехал на другую кнопку — щёлкаем, как это делает меню игры.
+    // Уход с кнопки в пустоту молчит: звучит появление, а не пропажа.
+    if layout.hovered != ui.hovered {
+        if layout.hovered.is_some() {
+            crate::input::request_sound(crate::input::SOUND_TICK);
+        }
+        ui.hovered = layout.hovered;
     }
     Frame {
         over_ui: layout.over_ui,

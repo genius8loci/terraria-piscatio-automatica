@@ -80,6 +80,9 @@ pub fn flight_lost(config: &Config, tries: u32) {
     let t = lang::t();
     let body = lang::fill(t.chat_flight_lost, &[&tries.to_string()]);
     input::queue_chat(line(&config.chat_color_info, t.chat_info, &body));
+    // Остановку легко проглядеть: игрок в этот момент занят другим окном.
+    // Звук тот же, каким игра отмечает появление строки в чате.
+    input::request_sound(input::SOUND_CHAT);
 }
 
 /// Автопитьё долило баф.
