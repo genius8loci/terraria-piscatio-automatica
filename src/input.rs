@@ -185,6 +185,19 @@ fn pace(tick: u32) {
     }
 }
 
+/// Окно вернулось: выдержка не нужна.
+///
+/// Отметку прошлого тика сбрасываем, иначе первый же свёрнутый тик сравнится
+/// с давним временем и выдержки не будет. И возвращаем системе разрешение
+/// таймера: миллисекундное имеет смысл, только пока мы сами отмеряем сон,
+/// а держать его всю сессию — зря греть батарею на ноутбуке.
+fn pace_idle() {
+    unsafe { *PACE.0.get() = None };
+    if PERIOD_RAISED.swap(false, Ordering::Relaxed) {
+        let _ = unsafe { timeEndPeriod(1) };
+    }
+}
+
 /// Возвращает системе прежнее разрешение таймера и гасит выдержку: рабочего
 /// потока больше нет, обновлять признак активности окна некому.
 pub fn shutdown() {
@@ -325,7 +338,7 @@ pub fn on_item_check(this: *mut c_void) {
     if INACTIVE.load(Ordering::Relaxed) {
         pace(tick);
     } else {
-        unsafe { *PACE.0.get() = None };
+        pace_idle();
     }
 
     let command = COMMAND.load(Ordering::Acquire);

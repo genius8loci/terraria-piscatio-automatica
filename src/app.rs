@@ -194,9 +194,20 @@ pub fn run(dll_dir: PathBuf) {
                             None => "неизвестна".to_string(),
                         }
                     );
-                    throttle_was = apply_settings(&attached, &config);
+                    // Порядок важен: сон свёрнутой игры снимает `apply_settings`,
+                    // а держит её после этого выдержка тиков — она живёт
+                    // в детуре. Снять сон, не поставив детур, значит оставить
+                    // игру вообще без ограничителя скорости.
                     let ready = install_detour(&attached);
                     state::with(|s| s.status.detour_ready = ready);
+                    if ready {
+                        throttle_was = apply_settings(&attached, &config);
+                    } else {
+                        log!(
+                            "детур не встал — сон свёрнутой игры не трогаю: \
+                             держать её скорость было бы нечем"
+                        );
+                    }
                     if config.cursor_detour {
                         install_cursor_detour(&attached);
                     } else {

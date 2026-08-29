@@ -67,9 +67,14 @@ pub struct Game {
     f_version: Option<Field>,
     f_mouse_x: Field,
     f_mouse_y: Field,
-    f_fish_drops: Field,
+    /// `Main.FishDropsDB` — список всего ловимого. Необязательно: без него
+    /// не будет сетки фильтра и иконок, но ловля в режиме чёрного списка
+    /// (берём всё) работает.
+    f_fish_drops: Option<Field>,
     /// `Main.itemAnimations` — по элементу на предмет, `null` у неподвижных.
-    f_item_animations: Field,
+    /// Необязательно: без него у анимированных иконок в ячейку попадёт вся
+    /// лента кадров вместо одного, и только.
+    f_item_animations: Option<Field>,
     /// `ItemID.Sets.IsFishingCrate` — таблица «это ящик», по id предмета.
     f_crate_set: Option<Field>,
     /// Свой экземпляр `Item` под расспросы об именах, и как его настроить.
@@ -80,7 +85,10 @@ pub struct Game {
 
     /// Для получения адреса JIT-кода `Player.ItemCheck`.
     m_item_check: Method,
-    m_draw_cursor: Method,
+    /// `Main.DrawCursor` — цель второго детура. Необязателен: он и так
+    /// выключается флагом в конфиге, а без него панель просто уходит
+    /// в `Present` и рисует курсор сама.
+    m_draw_cursor: Option<Method>,
     m_get_method_handle: Method,
     m_get_function_pointer: Method,
 
@@ -97,7 +105,10 @@ pub struct Game {
     pl_buff_type: Field,
     // `QuickStackAllChests` и `controlUseItem` здесь намеренно нет: и то
     // и другое трогается только с игрового потока, их хэндлы живут в `input`.
-    pl_add_buff: Method,
+    /// `Player.AddBuff` — им вешается баф выпитого зелья. Вместе
+    /// с `it_buff_time` необязателен: не нашлись — не будет автопитья,
+    /// оно и по умолчанию выключено.
+    pl_add_buff: Option<Method>,
     /// `Player.HeldItem` — предмет в выбранной ячейке хотбара. Это свойство
     /// (`inventory[selectedItem]`), а не поле, поэтому зовём геттер.
     /// Необязателен: не нашёлся — просто не будет проверки удочки в руке,
@@ -117,7 +128,8 @@ pub struct Game {
     it_type: Field,
     it_stack: Field,
     it_bait: Field,
-    it_buff_time: Field,
+    /// `Item.buffTime` — штатная длительность бафа зелья. См. `pl_add_buff`.
+    it_buff_time: Option<Field>,
     /// `Item.fishingPole` — сила удочки; у всего остального ноль. Ровно по
     /// нему игра и отличает удочку от прочего инвентаря.
     it_fishing_pole: Field,
@@ -148,8 +160,8 @@ impl Game {
         let game = Game {
             f_mouse_x: main.field("mouseX")?,
             f_mouse_y: main.field("mouseY")?,
-            f_fish_drops: main.field("FishDropsDB")?,
-            f_item_animations: main.field("itemAnimations")?,
+            f_fish_drops: main.field("FishDropsDB").ok(),
+            f_item_animations: main.field("itemAnimations").ok(),
             // Вложенный тип в рефлексии пишется через плюс. Без него
             // пропадёт только счётчик ящиков, поэтому ошибку глотаем.
             f_crate_set: assembly
@@ -161,7 +173,7 @@ impl Game {
             m_affix_name: item.method("AffixName").ok(),
             m_item_clone: item.method("Clone").ok(),
             m_item_check: player.method("ItemCheck")?,
-            m_draw_cursor: main.method("DrawCursor")?,
+            m_draw_cursor: main.method("DrawCursor").ok(),
             m_get_method_handle: method_base.method("get_MethodHandle")?,
             m_get_function_pointer: method_handle.method("GetFunctionPointer")?,
 
@@ -181,7 +193,7 @@ impl Game {
 
             pl_inventory: player.field("inventory")?,
             pl_buff_type: player.field("buffType")?,
-            pl_add_buff: player.method("AddBuff")?,
+            pl_add_buff: player.method("AddBuff").ok(),
             m_held_item: player.method("get_HeldItem").ok(),
             m_active_culture: assembly
                 .get_type("Terraria.Localization.Language")
@@ -202,7 +214,7 @@ impl Game {
             it_type: item.field("type")?,
             it_stack: item.field("stack")?,
             it_bait: item.field("bait")?,
-            it_buff_time: item.field("buffTime")?,
+            it_buff_time: item.field("buffTime").ok(),
             it_fishing_pole: item.field("fishingPole")?,
 
             _clr: clr,
@@ -289,7 +301,11 @@ impl Game {
 
     /// `Main.DrawCursor` — точка, где интерфейс уже выгружен, а курсор ещё нет.
     pub fn draw_cursor_address(&self) -> Result<usize> {
-        self.jit_address(&self.m_draw_cursor)
+        let method = self
+            .m_draw_cursor
+            .as_ref()
+            .ok_or_else(|| err("метода Main.DrawCursor нет"))?;
+        self.jit_address(method)
     }
 
     /// Адрес машинного кода метода: `MethodBase.MethodHandle.GetFunctionPointer()`.
@@ -308,7 +324,10 @@ impl Game {
     /// в `Main.itemAnimations[id].FrameCount`. У неподвижных там `null`,
     /// и кадр ровно один.
     pub fn item_frames(&self, item: i32) -> Result<u32> {
-        let animations = self.f_item_animations.get_static()?;
+        let Some(field) = self.f_item_animations.as_ref() else {
+            return Ok(1);
+        };
+        let animations = field.get_static()?;
         if animations.is_null() || item < 0 || item >= array_len(&animations)? {
             return Ok(1);
         }
@@ -402,7 +421,11 @@ impl Game {
     /// с приватным `List<FishDropRule>`, а у каждого правила есть
     /// `public int[] PossibleItems`. Никаких зашитых списков.
     pub fn fishable_items(&self) -> Result<Vec<i32>> {
-        let db = self.f_fish_drops.get_static()?;
+        let field = self
+            .f_fish_drops
+            .as_ref()
+            .ok_or_else(|| err("поля Main.FishDropsDB нет"))?;
+        let db = field.get_static()?;
         if db.is_null() {
             return Err(err("Main.FishDropsDB ещё не заполнен"));
         }
@@ -486,16 +509,21 @@ impl Game {
     /// Выпить зелье из слота: вешаем бафф на его штатную длительность
     /// и тратим одну штуку.
     pub fn drink(&self, player: &Var, slot: i32, buff: i32) -> Result<()> {
+        let (Some(add_buff), Some(buff_time)) =
+            (self.pl_add_buff.as_ref(), self.it_buff_time.as_ref())
+        else {
+            return Err(err("Player.AddBuff или Item.buffTime не нашлись"));
+        };
         let inventory = self.pl_inventory.get(player)?;
         let item = array_get(&inventory, slot)?;
         if item.is_null() {
             return Err(err("слот пуст"));
         }
-        let duration = self.it_buff_time.get(&item)?.as_int().unwrap_or(0);
+        let duration = buff_time.get(&item)?.as_int().unwrap_or(0);
         if duration <= 0 {
             return Err(err("у предмета нет длительности баффа"));
         }
-        self.pl_add_buff.invoke(
+        add_buff.invoke(
             player,
             &[Var::int(buff), Var::int(duration), Var::boolean(false)],
         )?;
