@@ -923,8 +923,10 @@ fn filter_window(
     // Отметки снимаем здесь же, одним заходом под замок: раньше он брался
     // на каждую видимую ячейку, то есть по полсотни раз за кадр.
     let query = ui.search.trim().to_lowercase();
-    let items: Vec<(i32, Mark)> = state::with(|s| {
-        let mut out = Vec::with_capacity(s.fishable.len());
+    // Режим списка забираем тем же заходом: он нужен шапке ниже, а лишний
+    // захват мьютекса на кадр здесь ничем не оправдан.
+    let (items, whitelist) = state::with(|s| {
+        let mut out: Vec<(i32, Mark)> = Vec::with_capacity(s.fishable.len());
         for id in &s.fishable {
             if !query.is_empty()
                 && !s
@@ -935,7 +937,7 @@ fn filter_window(
             }
             out.push((*id, s.filter.get(id).copied().unwrap_or(Mark::Neutral)));
         }
-        out
+        (out, s.whitelist_mode)
     })
     .unwrap_or_default();
 
@@ -995,7 +997,6 @@ fn filter_window(
     // Шапка: заголовок по центру и сразу за ним катушка — переключатель
     // режима списка. Отдельной строки под режим нет: что он значит,
     // рассказывает подсказка под курсором, как у ячеек зелий.
-    let whitelist = state::with(|s| s.whitelist_mode).unwrap_or(false);
     let title = lang::t().tab_filter;
     let title_w = layout.painter.measure(title);
     let side = layout.knob_side(row_h);

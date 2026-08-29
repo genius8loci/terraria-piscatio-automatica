@@ -11,7 +11,7 @@ use crate::chat;
 use crate::config::Config;
 use crate::crash;
 use crate::detour;
-use crate::game::{Game, POTIONS};
+use crate::game::{Game, POTIONS, Stock};
 use crate::input;
 use crate::log;
 use crate::overlay::state;
@@ -555,30 +555,30 @@ impl Fishing {
         }
     }
 
-    fn refresh_stock(&mut self, game: &Game) -> (i32, i32) {
+    /// Перечитывает инвентарь одним проходом и отдаёт снимок панели.
+    ///
+    /// `None` — игрока сейчас нет (меню, смена мира): звать игру не о чем,
+    /// и панель показывает прочерки.
+    fn refresh_stock(&mut self, game: &Game) -> Option<Stock> {
         let _step = crash::Step::worker(crash::STEP_STOCK);
-        let Ok(Some(player)) = game.local_player() else {
-            state::with(|s| {
-                s.status.bait = -1;
+        let stock = game
+            .local_player()
+            .ok()
+            .flatten()
+            .and_then(|player| game.read_stock(&player).ok());
+        state::with(|s| match stock {
+            Some(stock) => {
+                s.status.free_slots = stock.free;
+                // Панель гасит ячейки кончившихся зелий, и делать это надо
+                // на ходу: запас тает прямо во время рыбалки.
+                s.status.potions_missing = stock.potions.map(|slot| slot.is_none());
+            }
+            None => {
                 s.status.free_slots = -1;
                 s.status.potions_missing = [false; 3];
-            });
-            return (-1, -1);
-        };
-        let bait = game.bait_total(&player).unwrap_or(-1);
-        let free = game.free_slots(&player).unwrap_or(-1);
-        // Зелья пересчитываем здесь же: панель гасит ячейки тех, что кончились,
-        // и делать это надо на ходу — запас тает прямо во время рыбалки.
-        let mut missing = [false; 3];
-        for (index, (item, _, _)) in POTIONS.iter().enumerate() {
-            missing[index] = matches!(game.find_item(&player, *item), Ok(None));
-        }
-        state::with(|s| {
-            s.status.bait = bait;
-            s.status.free_slots = free;
-            s.status.potions_missing = missing;
+            }
         });
-        (bait, free)
+        stock
     }
 
     /// Автопитьё: доливаем только те бафы, что выбраны в панели и погасли.
@@ -641,6 +641,16 @@ impl Fishing {
             log!("поклёвка: улов {rolled} прошёл бы фильтр, но рыбалка выключена");
             return;
         }
+        // Влезет ли именно этот улов. Спрашиваем здесь, а не при забросе:
+        // тут предмет уже известен, а пропуск не стоит наживки — она
+        // тратится только на подсечку. Спавны (отрицательный id) в инвентарь
+        // не кладутся, их не проверяем.
+        if rolled > 0 && !self.fits(game, rolled) {
+            self.last_bite = rolled;
+            self.skips += 1;
+            log!("пропуск: улову {rolled} некуда лечь, наживка не тратится");
+            return;
+        }
         // Заняты или ещё не вышла пауза — поклёвку **не** помечаем разобранной:
         // окно подсечки открыто, попробуем на следующем тике. Раньше отметка
         // ставилась выше, и такая рыба пропадала совсем — до конца окна к ней
@@ -654,6 +664,19 @@ impl Fishing {
         self.last_bite = rolled;
         let pause = self.jitter(config, AFTER_PULL);
         self.next_action = Instant::now() + pause;
+    }
+
+    /// Есть ли в инвентаре место под этот предмет.
+    ///
+    /// Не смогли спросить игру — отвечаем «да»: не знать не повод отказываться
+    /// от улова, а от полного инвентаря нас и так страхует остановка.
+    fn fits(&self, game: &Game, rolled: i32) -> bool {
+        let _step = crash::Step::worker(crash::STEP_STOCK);
+        game.local_player()
+            .ok()
+            .flatten()
+            .and_then(|player| game.has_room_for(&player, rolled).ok())
+            .unwrap_or(true)
     }
 
     /// Рассказывает игроку в чат, что случилось с этой поклёвкой.
@@ -705,19 +728,22 @@ impl Fishing {
             return;
         }
 
-        let (bait, free) = self.refresh_stock(game);
-        self.last_stock = Instant::now();
-        if bait < 0 {
+        let Some(stock) = self.refresh_stock(game) else {
             return;
-        }
-        if bait == 0 {
+        };
+        self.last_stock = Instant::now();
+        if !stock.has_bait {
             self.stop(state::Stop::NoBait);
             log!("рыбалка остановлена: наживка кончилась");
             return;
         }
 
-        // Забрасывать в полный инвентарь бессмысленно: улов просто пропадёт.
-        if free == 0 {
+        // Забрасывать в совсем полный инвентарь бессмысленно: улову некуда
+        // лечь. Неполный стак местом считаем: игра роняет добычу предметом
+        // в мир, а подбор дописывает её в существующий стак. Подойдёт ли это
+        // место конкретному улову, решаем уже при поклёвке — там он известен,
+        // а пропуск ничего не стоит.
+        if stock.free == 0 && !stock.partial {
             let quick_stack = state::with(|s| s.quick_stack).unwrap_or(false);
             if !quick_stack {
                 self.stop(state::Stop::InventoryFull);

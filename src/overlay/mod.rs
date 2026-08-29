@@ -218,6 +218,13 @@ static ICONS: Mutex<Option<IconAtlas>> = Mutex::new(None);
 /// Набор предметов, под который собран текущий атлас: id и число кадров.
 /// `None` — атлас не собирали ещё ни разу.
 static ICON_ITEMS: Mutex<Option<Vec<(i32, u32)>>> = Mutex::new(None);
+/// Кэш ширины строк: ключ — строка и масштаб битами, значение — пиксели.
+/// Живёт на потоке рендера, см. `Painter::measure`.
+static TEXT_WIDTH: std::sync::LazyLock<Mutex<std::collections::HashMap<(String, u32), f32>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+/// Больше этого кэш не растёт: набранное в строке поиска попадает сюда
+/// по варианту на нажатие, и без предела таблица копилась бы всю сессию.
+const TEXT_CACHE_LIMIT: usize = 256;
 
 // Замки берём с разотравлением: под ними лежат пиксели и раскладка панели,
 // после паники они устаревают, но не становятся опасными. Отказ же брать
@@ -584,6 +591,11 @@ unsafe fn present(
         // CLR из кадра. Детур курсора читает уже готовые значения.
         let (mx, my, down) = crate::input::cursor().unwrap_or((-1, -1, false));
         feed_input(mx, my, down, crate::input::wheel());
+
+        // Чат и звук отдаём игре отсюда, а не из детура `ItemCheck`: здесь
+        // поток пришёл через P/Invoke и сборка мусора разбирает его стек
+        // нормально. Подробности — в `input::on_present`.
+        crate::input::on_present();
         if let Some(scale) = crate::input::ui_scale() {
             UI_SCALE.store(scale.to_bits(), Ordering::Relaxed);
         }
@@ -918,7 +930,38 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// Ширина строки в пикселях.
+    ///
+    /// Замер идёт по символам с поиском каждого в таблице глифов, а раскладка
+    /// спрашивает про одни и те же подписи по многу раз за кадр — только
+    /// ширину панели считают тринадцать замеров, и все они каждый кадр
+    /// повторяются слово в слово. Поэтому ответ кладётся в кэш.
+    ///
+    /// Ключ — сама строка **вместе с масштабом**: при смене масштаба
+    /// интерфейса ответы другие, и старые брать нельзя. Смену языка ключ
+    /// переживает сам собой, потому что подписи на разных языках — разные
+    /// строки. Кэш держим только для коротких строк: набранное в поиске
+    /// меняется каждый кадр и засорило бы таблицу навсегда.
     pub fn measure(&self, value: &str) -> f32 {
+        const CACHE_LIMIT: usize = 64;
+        if value.len() <= CACHE_LIMIT
+            && let Ok(mut cache) = TEXT_WIDTH.lock()
+        {
+            let key = (value.to_string(), self.scale.to_bits());
+            if let Some(width) = cache.get(&key) {
+                return *width;
+            }
+            let width = self.measure_uncached(value);
+            if cache.len() >= TEXT_CACHE_LIMIT {
+                cache.clear();
+            }
+            cache.insert(key, width);
+            return width;
+        }
+        self.measure_uncached(value)
+    }
+
+    fn measure_uncached(&self, value: &str) -> f32 {
         let Some(font) = self.font else {
             return 0.0;
         };

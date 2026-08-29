@@ -59,6 +59,8 @@ pub static STACKS: AtomicU32 = AtomicU32::new(0);
 
 /// Тик, в котором команда уже применялась.
 static LAST_TICK: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Подсказка предмета уже срывалась — второй раз в лог не пишем.
+static TOOLTIP_FAILED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Граница игрового тика
@@ -136,6 +138,13 @@ fn tick_of(this: *mut c_void) -> u32 {
 
 /// Сколько времени отводится одному тику: 60 в секунду, как у игры.
 const TICK_PERIOD: Duration = Duration::from_micros(16_667);
+/// Насколько игре позволено забегать вперёд, не встречая выдержки.
+///
+/// Догоняющий цикл XNA после сна при потере фокуса выдаёт по два-три
+/// `Update` подряд — это штатная работа, и мешать ей нельзя. Четверть
+/// секунды запаса покрывает такие пачки с избытком, а настоящий разгон
+/// (тысячи тиков в секунду) съедает её за один кадр.
+const TICK_BURST: Duration = Duration::from_millis(250);
 
 /// Окно игры не впереди — выдержку держим мы. Ставит рабочий поток.
 static INACTIVE: AtomicBool = AtomicBool::new(false);
@@ -155,16 +164,25 @@ pub fn window_active() -> bool {
 /// Номер тика и время, на которое он был выдержан.
 static PACE: GameThreadCell<Option<(u32, Instant)>> = GameThreadCell(UnsafeCell::new(None));
 
-/// Держит свёрнутую игру на 60 тиках в секунду.
+/// Ограничивает **среднюю** скорость неактивной игры шестьюдесятью тиками
+/// в секунду, не мешая всплескам.
 ///
-/// Звать только при неактивном окне — отметку прошлого тика сбрасывает
-/// вызывающий, как только окно возвращается.
+/// Всплески трогать нельзя, и это выяснилось дорого. При `IsFixedTimeStep`
+/// XNA после сна догоняет накопленное время: прогоняет два-три `Update`
+/// подряд в одном проходе цикла. Прежняя выдержка усыпляла **каждый**
+/// `Update` на 16.7 мс и встревала прямо внутрь этого догоняющего цикла —
+/// проход растягивался, накапливалось ещё больше времени, следующий проход
+/// требовал ещё больше обновлений. Частота кадров складывалась до 5–10.
 ///
-/// Ни одного обращения к CLR: номер тика приходит готовым, см. `tick_of`.
-/// Сон идёт на игровом потоке изнутри managed-метода, то есть сборка мусора
-/// на это время откладывается. Задержка ограничена одним тиком и бывает
-/// только при свёрнутом окне, когда игре и без того нечего рисовать, —
-/// это заметно дешевле, чем сорокакратный разгон мира.
+/// Поэтому здесь не «сон между тиками», а разрешение бежать вперёд:
+/// накопленному опережению позволяем дорасти до `TICK_BURST`, и только
+/// сверх него досыпаем. Ровная работа игры (шестьдесят тиков в секунду,
+/// хоть бы и пачками) опережения не создаёт вовсе, и сна не происходит
+/// ни разу. Разгон же создаёт его мгновенно.
+///
+/// Звать только при неактивном окне — отметку сбрасывает вызывающий, как
+/// только окно возвращается. Ни одного обращения к CLR: номер тика приходит
+/// готовым, см. `tick_of`.
 fn pace(tick: u32) {
     // Без миллисекундного разрешения `Sleep` округляется до 15.6 мс, и вместо
     // шестидесяти тиков вышло бы тридцать два.
@@ -174,23 +192,27 @@ fn pace(tick: u32) {
 
     let slot = unsafe { &mut *PACE.0.get() };
     let now = Instant::now();
-    match *slot {
-        // Тот же тик, просто другой игрок: в сетевой игре `ItemCheck`
-        // вызывается по разу на каждого. Спать второй раз нельзя.
-        Some((last, _)) if last == tick => {}
-        Some((_, at)) => {
-            let due = at + TICK_PERIOD;
-            if now < due {
-                std::thread::sleep(due - now);
-                // Считаем от расчётного мгновения, а не от фактического
-                // пробуждения: иначе округление сна копилось бы в отставание.
-                *slot = Some((tick, due));
-            } else {
-                *slot = Some((tick, now));
-            }
-        }
-        None => *slot = Some((tick, now)),
+    let Some((last, credit)) = *slot else {
+        *slot = Some((tick, now));
+        return;
+    };
+    // Тот же тик, просто другой игрок: в сетевой игре `ItemCheck` вызывается
+    // по разу на каждого. Второй раз этот тик не считаем.
+    if last == tick {
+        return;
     }
+
+    // `credit` — мгновение, до которого игра уже «отработала» тиками.
+    // Обогнала реальное время больше чем на `TICK_BURST` — придерживаем.
+    if let Some(ahead) = credit.checked_duration_since(now)
+        && ahead > TICK_BURST
+    {
+        std::thread::sleep(ahead - TICK_BURST);
+    }
+    // Отстала — начинаем счёт заново от текущего мгновения, иначе долг
+    // копился бы и потом выстрелил пачкой пропущенных выдержек.
+    let base = credit.max(now);
+    *slot = Some((tick, base + TICK_PERIOD));
 }
 
 /// Окно вернулось: выдержка не нужна.
@@ -351,10 +373,8 @@ pub fn on_item_check(this: *mut c_void) {
 
     let command = COMMAND.load(Ordering::Acquire);
     let stack = QUICK_STACK.load(Ordering::Acquire);
-    let chat = CHAT_PENDING.load(Ordering::Acquire);
-    let sound = SOUND.load(Ordering::Acquire);
     let release = RELEASE.load(Ordering::Acquire);
-    if command == CMD_NONE && !stack && !chat && !sound && !release {
+    if command == CMD_NONE && !stack && !release {
         // Быстрый путь: у игры впереди — ни одного обращения к CLR.
         return;
     }
@@ -364,8 +384,6 @@ pub fn on_item_check(this: *mut c_void) {
         COMMAND.store(CMD_NONE, Ordering::Release);
         RELEASE.store(false, Ordering::Release);
         QUICK_STACK.store(false, Ordering::Release);
-        CHAT_PENDING.store(false, Ordering::Release);
-        chat_queue().clear();
         crate::log!("ввод: поднять хэндлы не удалось, команда отменена");
         return;
     };
@@ -387,17 +405,6 @@ pub fn on_item_check(this: *mut c_void) {
         QUICK_STACK.store(false, Ordering::Release);
         let _step = crash::Step::game(crash::STEP_QUICK_STACK);
         quick_stack(handles);
-    }
-
-    if chat {
-        let _step = crash::Step::game(crash::STEP_CHAT);
-        flush_chat(handles);
-    }
-
-    if sound {
-        SOUND.store(false, Ordering::Release);
-        let _step = crash::Step::game(crash::STEP_SOUND);
-        play_sound(handles);
     }
 
     let _step = crash::Step::game(crash::STEP_CLICK);
@@ -426,6 +433,43 @@ pub fn on_item_check(this: *mut c_void) {
             CLICKS.fetch_add(1, Ordering::Relaxed);
         }
         _ => COMMAND.store(CMD_NONE, Ordering::Release),
+    }
+}
+
+/// Отдаёт игре накопленные строки чата и звук квестовой рыбы.
+///
+/// Зовётся из хука `Present`, а не из детура `ItemCheck`, и это важно.
+/// В `Present` игра приходит через P/Invoke: поток в вытесняющем режиме
+/// и с честной переходной рамкой, так что сборка мусора разбирает такой
+/// стек нормально. Детур же стоит на первых байтах managed-метода, где
+/// кадр ещё не построен, — а `MethodInfo.Invoke` сам выделяет память
+/// и потому может запустить сборку ровно в этот момент. Именно так игра
+/// и умирала (`mark_object_simple`, чтение по нулю).
+///
+/// Плата — задержка до кадра: чат и звук отстают от события на 16 мс.
+/// На глаз это незаметно, а риска больше нет.
+///
+/// Раскладка по сундукам сюда **не** перенесена: игра зовёт её из
+/// `Main.DrawInventory`, то есть из середины кадра, и что она делает
+/// с общими буферами после отрисовки — не проверено. Идёт единицами
+/// в минуту, так что осталась в детуре.
+pub fn on_present() {
+    if !CHAT_PENDING.load(Ordering::Acquire) && !SOUND.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(handles) = handles() else {
+        CHAT_PENDING.store(false, Ordering::Release);
+        SOUND.store(false, Ordering::Release);
+        chat_queue().clear();
+        return;
+    };
+    if CHAT_PENDING.load(Ordering::Acquire) {
+        let _step = crash::Step::game(crash::STEP_CHAT);
+        flush_chat(handles);
+    }
+    if SOUND.swap(false, Ordering::AcqRel) {
+        let _step = crash::Step::game(crash::STEP_SOUND);
+        play_sound(handles);
     }
 }
 
@@ -941,11 +985,18 @@ pub fn show_item_tooltip(id: i32) {
     };
 
     // Редкость отдаём игре: от неё зависит цвет имени в подсказке.
-    if api
-        .display
-        .invoke(&Var::null(), &[Var::int(hovered.rare)])
-        .is_err()
-    {
+    //
+    // Параметр у `DisplayAndGetFakeItem` объявлен как `ItemRarityColor`, то
+    // есть enum, а мы шлём `Int32` и полагаемся на то, что биндер рефлексии
+    // его свернёт. Если не свернёт, подсказок предметов не будет вовсе —
+    // и молча, потому что дальше мы просто выходим. Поэтому первый отказ
+    // пишем в лог: иначе такую пропажу можно не заметить годами.
+    if let Err(e) = api.display.invoke(&Var::null(), &[Var::int(hovered.rare)]) {
+        if !TOOLTIP_FAILED.swap(true, Ordering::Relaxed) {
+            crate::log!(
+                "подсказки предметов недоступны: DisplayAndGetFakeItem не приняла вызов ({e})"
+            );
+        }
         return;
     }
     let _ = api.hover_item.set_static(Var::object(&hovered.item));

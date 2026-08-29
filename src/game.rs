@@ -6,15 +6,24 @@
 use windows::core::Result;
 
 use crate::clr::{
-    BINDING_INSTANCE, BINDING_NON_PUBLIC, Clr, Field, Method, Type, Var, array_get, array_len, err,
+    BINDING_INSTANCE, BINDING_NON_PUBLIC, BINDING_STATIC, Clr, Field, Method, Type, Var, array_get,
+    array_len, err,
 };
 
 /// Запасной размер `Main.projectile`: в 1.4.5.8 массив на 1001 снаряд.
 /// Настоящую длину спрашиваем у самого массива, это лишь откат на случай,
 /// если она почему-то не прочиталась.
+///
+/// Сама игра во всех своих обходах снарядов идёт `i < 1000`, то есть
+/// последнюю ячейку не использует. Мы смотрим и её — лишний слот безвреден.
 const MAX_PROJECTILES: i32 = 1001;
-/// Размер `Player.inventory` — 59; слоты 0..49 это основная сетка.
+/// Размер `Player.inventory` — 59 (проверено по декомпиляции); слоты 0..49
+/// это основная сетка.
 const INVENTORY_MAIN_SLOTS: i32 = 50;
+/// Патронные слоты 54..57. `Player.Fishing_GetBait` смотрит их **первыми**
+/// и только потом основную сетку, так что наживку там пропускать нельзя.
+const BAIT_SLOTS_START: i32 = 54;
+const BAIT_SLOTS_END: i32 = 58;
 /// Запасное значение `Player.maxBuffs` (44 в 1.4.5.8): настоящую длину
 /// берём у самого массива баффов.
 const MAX_BUFFS: i32 = 44;
@@ -68,6 +77,10 @@ pub struct Game {
     f_version: Option<Field>,
     f_mouse_x: Field,
     f_mouse_y: Field,
+    /// `PlayerInput._originalMouseX/_originalMouseY` — курсор в исходных
+    /// пикселях экрана. Читать надо именно их, см. `mouse()`.
+    f_raw_mouse_x: Option<Field>,
+    f_raw_mouse_y: Option<Field>,
     /// `Main.FishDropsDB` — список всего ловимого. Необязательно: без него
     /// не будет сетки фильтра и иконок, но ловля в режиме чёрного списка
     /// (берём всё) работает.
@@ -129,11 +142,24 @@ pub struct Game {
     it_type: Field,
     it_stack: Field,
     it_bait: Field,
+    /// `Item.maxStack` — по нему видно, влезет ли улов в существующий стак.
+    /// Не нашлось — считаем стаки полными, то есть ведём себя как раньше.
+    it_max_stack: Option<Field>,
     /// `Item.buffTime` — штатная длительность бафа зелья. См. `pl_add_buff`.
     it_buff_time: Option<Field>,
     /// `Item.fishingPole` — сила удочки; у всего остального ноль. Ровно по
     /// нему игра и отличает удочку от прочего инвентаря.
     it_fishing_pole: Field,
+}
+
+/// Приватное статическое поле `PlayerInput`. Не нашлось — вернём `None`,
+/// и вызывающий откатится на публичный аналог.
+fn raw_mouse(assembly: &crate::clr::Assembly, name: &'static str) -> Option<Field> {
+    assembly
+        .get_type("Terraria.GameInput.PlayerInput")
+        .ok()?
+        .field_flags(name, BINDING_NON_PUBLIC | BINDING_STATIC)
+        .ok()
 }
 
 impl Game {
@@ -161,6 +187,8 @@ impl Game {
         let game = Game {
             f_mouse_x: main.field("mouseX")?,
             f_mouse_y: main.field("mouseY")?,
+            f_raw_mouse_x: raw_mouse(&assembly, "_originalMouseX"),
+            f_raw_mouse_y: raw_mouse(&assembly, "_originalMouseY"),
             f_fish_drops: main.field("FishDropsDB").ok(),
             f_item_animations: main.field("itemAnimations").ok(),
             // Вложенный тип в рефлексии пишется через плюс. Без него
@@ -215,6 +243,7 @@ impl Game {
             it_type: item.field("type")?,
             it_stack: item.field("stack")?,
             it_bait: item.field("bait")?,
+            it_max_stack: item.field("maxStack").ok(),
             it_buff_time: item.field("buffTime").ok(),
             it_fishing_pole: item.field("fishingPole")?,
 
@@ -270,11 +299,33 @@ impl Game {
             .unwrap_or(false)
     }
 
-    /// Экранные координаты курсора игры.
+    /// Курсор игры в исходных пикселях экрана.
+    ///
+    /// Берём `PlayerInput._originalMouseX/_originalMouseY`, а не `Main.mouseX`.
+    /// Последний за кадр трижды меняет смысл: `SetZoom_UI` записывает в него
+    /// `_originalMouseX * (1f / Main.UIScale)`, `SetZoom_World` пересчитывает
+    /// через зум мира, и только `SetZoom_Unscaled` возвращает исходное.
+    /// Рабочий поток читает поле в произвольной фазе кадра, так что попадание
+    /// в фазу интерфейса давало промах на весь масштаб UI (при 1.17 — около
+    /// пятнадцати процентов), а в мировую — произвольный. Точка заброса
+    /// запоминается один раз за сессию, поэтому единственный неудачный отсчёт
+    /// закреплял неверный заброс до конца рыбалки.
+    ///
+    /// Полей нет — откатываемся на `Main.mouseX`: это прежнее поведение,
+    /// неточное, но рабочее.
     pub fn mouse(&self) -> Result<(i32, i32)> {
+        let read = |raw: &Option<Field>, fallback: &Field| -> Result<i32> {
+            if let Some(field) = raw
+                && let Ok(value) = field.get_static()
+                && let Some(number) = value.as_int()
+            {
+                return Ok(number);
+            }
+            Ok(fallback.get_static()?.as_int().unwrap_or(-1))
+        };
         Ok((
-            self.f_mouse_x.get_static()?.as_int().unwrap_or(-1),
-            self.f_mouse_y.get_static()?.as_int().unwrap_or(-1),
+            read(&self.f_raw_mouse_x, &self.f_mouse_x)?,
+            read(&self.f_raw_mouse_y, &self.f_mouse_y)?,
         ))
     }
 
@@ -627,43 +678,108 @@ impl Game {
         }))
     }
 
-    /// Суммарный стак наживки в инвентаре. Логика повторяет
-    /// `Player.Fishing_GetBait`: предмет считается наживкой при `bait > 0`.
-    pub fn bait_total(&self, player: &Var) -> Result<i32> {
+    /// Всё, что автомату нужно знать об инвентаре, за один проход.
+    ///
+    /// Раньше это были пять независимых обходов подряд — наживка, свободные
+    /// ячейки и по одному на каждое из трёх зелий, — и каждый стоил полусотни
+    /// обращений к CLR восемь раз в секунду. Здесь предмет читается один раз,
+    /// и все пять ответов набираются попутно.
+    pub fn read_stock(&self, player: &Var) -> Result<Stock> {
         let inventory = self.pl_inventory.get(player)?;
-        let mut total = 0;
-        for i in 0..INVENTORY_MAIN_SLOTS {
+        let mut stock = Stock::default();
+
+        // Наживка живёт ещё и в патронных слотах, причём игра смотрит их
+        // первыми: `Player.Fishing_GetBait` перебирает 54..57 и только потом
+        // основную сетку. Пропуская их, мы объявляли «наживка кончилась»
+        // при полном запасе.
+        for i in 0..INVENTORY_MAIN_SLOTS.max(BAIT_SLOTS_END) {
+            let main_grid = i < INVENTORY_MAIN_SLOTS;
+            let bait_slot = (BAIT_SLOTS_START..BAIT_SLOTS_END).contains(&i);
+            if !main_grid && !bait_slot {
+                continue;
+            }
             let item = array_get(&inventory, i)?;
             if item.is_null() {
+                if main_grid {
+                    stock.free += 1;
+                }
                 continue;
             }
+            let kind = self.it_type.get(&item)?.as_int().unwrap_or(0);
             let stack = self.it_stack.get(&item)?.as_int().unwrap_or(0);
-            if stack <= 0 {
+            if kind == 0 || stack <= 0 {
+                if main_grid {
+                    stock.free += 1;
+                }
                 continue;
             }
-            if self.it_bait.get(&item)?.as_int().unwrap_or(0) > 0 {
-                total += stack;
+            if !stock.has_bait && self.it_bait.get(&item)?.as_int().unwrap_or(0) > 0 {
+                stock.has_bait = true;
+            }
+            if !main_grid {
+                continue;
+            }
+            for (slot, wanted) in stock.potions.iter_mut().zip(POTIONS.iter()) {
+                if slot.is_none() && kind == wanted.0 {
+                    *slot = Some(i);
+                }
+            }
+            // Неполный стак — тоже место под улов: игра отдаёт добычу через
+            // `QuickSpawnItem`, то есть роняет предметом в мир, а подбор
+            // дописывает в существующий стак.
+            if !stock.partial
+                && let Some(max) = self.it_max_stack.as_ref()
+                && stack < max.get(&item)?.as_int().unwrap_or(stack)
+            {
+                stock.partial = true;
             }
         }
-        Ok(total)
+        Ok(stock)
     }
 
-    /// Свободные слоты основной сетки инвентаря.
-    pub fn free_slots(&self, player: &Var) -> Result<i32> {
+    /// Есть ли куда положить именно этот предмет.
+    ///
+    /// Спрашивается в момент поклёвки, когда улов уже известен. Пропуск
+    /// ничего не стоит — наживка тратится только на подсечку, — поэтому
+    /// проверять точно дешевле, чем останавливаться заранее «на всякий
+    /// случай»: при полной сетке и одном стаке «Окунь 30/99» влезет ещё
+    /// шестьдесят девять окуней.
+    pub fn has_room_for(&self, player: &Var, item_type: i32) -> Result<bool> {
         let inventory = self.pl_inventory.get(player)?;
-        let mut free = 0;
         for i in 0..INVENTORY_MAIN_SLOTS {
             let item = array_get(&inventory, i)?;
             if item.is_null() {
-                free += 1;
+                return Ok(true);
+            }
+            let kind = self.it_type.get(&item)?.as_int().unwrap_or(0);
+            let stack = self.it_stack.get(&item)?.as_int().unwrap_or(0);
+            if kind == 0 || stack <= 0 {
+                return Ok(true);
+            }
+            if kind != item_type {
                 continue;
             }
-            let empty = self.it_type.get(&item)?.as_int().unwrap_or(0) == 0
-                || self.it_stack.get(&item)?.as_int().unwrap_or(0) == 0;
-            if empty {
-                free += 1;
+            let Some(max) = self.it_max_stack.as_ref() else {
+                continue;
+            };
+            if stack < max.get(&item)?.as_int().unwrap_or(stack) {
+                return Ok(true);
             }
         }
-        Ok(free)
+        Ok(false)
     }
+}
+
+/// Снимок инвентаря: всё, что автомат спрашивает про запасы.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Stock {
+    /// Наживка есть хоть где-то — в патронных слотах или в основной сетке.
+    pub has_bait: bool,
+    /// Пустых ячеек основной сетки.
+    pub free: i32,
+    /// Есть хотя бы один неполный стак: место под улов, вообще говоря, ещё
+    /// найдётся, просто не под любой предмет.
+    pub partial: bool,
+    /// Слоты зелий по порядку `POTIONS`.
+    pub potions: [Option<i32>; 3],
 }
