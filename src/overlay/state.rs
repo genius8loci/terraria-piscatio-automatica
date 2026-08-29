@@ -46,6 +46,25 @@ pub enum Bobber {
     InWater,
 }
 
+/// Почему автомат остановился сам.
+///
+/// Код, а не строка: причину показывает панель, а она рисуется на языке
+/// игры. Текст для лога остаётся русским и живёт отдельно, см.
+/// `Fishing::status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Stop {
+    #[default]
+    None,
+    /// Наживка кончилась.
+    NoBait,
+    /// Инвентарь полон, раскладка по сундукам выключена.
+    InventoryFull,
+    /// Инвентарь полон, а складывать некуда.
+    NoChests,
+    /// Поплавок так и не долетел до воды.
+    BobberStuck,
+}
+
 #[derive(Default)]
 pub struct Status {
     pub connected: String,
@@ -56,6 +75,8 @@ pub struct Status {
     /// Включились, когда поплавок уже лежал в воде: точку заброса по нему
     /// не взять, курсор к тому времени где угодно. Ждём нового заброса.
     pub recast: bool,
+    /// Автомат остановился сам — панель говорит, почему.
+    pub stop: Stop,
     pub free_slots: i32,
     pub bait: i32,
     pub detour_ready: bool,

@@ -98,7 +98,7 @@ pub struct Fishing {
     next_action: Instant,
     hint: Option<i32>,
     last_bite: i32,
-    stopped: Option<String>,
+    stopped: Option<state::Stop>,
     rng: u32,
     click_sent: Option<Sent>,
     /// Раньше какого мгновения не перебирать снаряды заново, см. `IDLE_SCAN`.
@@ -203,6 +203,7 @@ impl Fishing {
                 self.aim = None;
                 self.wait_recast = true;
                 self.stopped = None;
+                state::with(|s| s.status.stop = state::Stop::None);
                 self.stack_tries = 0;
                 // Счётчики идут с тем же нуля, что и время: иначе панель
                 // показывала свежие секунды рядом с уловом прошлой сессии.
@@ -229,10 +230,34 @@ impl Fishing {
         }
     }
 
-    /// Строка состояния для лога и панели.
+    /// Останавливает автомат и гасит переключатель.
+    ///
+    /// Переключатель гасим намеренно: иначе панель показывала бы включённую
+    /// авторыбалку у автомата, который уже ничего не делает. Заодно включить
+    /// её обратно становится одним щелчком, а не двумя: снятие `auto_fish`
+    /// закрывает сессию, а следующее включение чистит причину остановки
+    /// (см. `track_session`).
+    fn stop(&mut self, reason: state::Stop) {
+        self.stopped = Some(reason);
+        state::with(|s| {
+            s.auto_fish = false;
+            s.status.stop = reason;
+            s.dirty = true;
+        });
+    }
+
+    /// Строка состояния для лога. Лог у нас русский всегда, поэтому текст
+    /// причины собирается здесь, а не берётся из таблицы языков.
     pub fn status(&self) -> String {
-        if let Some(reason) = &self.stopped {
-            return format!("стоп: {reason}");
+        if let Some(reason) = self.stopped {
+            let text = match reason {
+                state::Stop::NoBait => "наживка кончилась",
+                state::Stop::InventoryFull => "инвентарь полон",
+                state::Stop::NoChests => "инвентарь полон, сундуков рядом нет",
+                state::Stop::BobberStuck => "поплавок не долетает до воды",
+                state::Stop::None => "без причины",
+            };
+            return format!("стоп: {text}");
         }
         if !self.enabled() {
             return "выключена".to_string();
@@ -413,6 +438,7 @@ impl Fishing {
             s.status.fishing = status;
             s.status.aim = self.aim;
             s.status.recast = self.wait_recast;
+            s.status.stop = self.stopped.unwrap_or_default();
             s.stats.seconds = self.session_seconds;
             s.stats.caught = self.pulls;
             s.stats.skipped = self.skips;
@@ -486,7 +512,7 @@ impl Fishing {
 
         self.flight_tries += 1;
         if self.flight_tries > FLIGHT_TRIES {
-            self.stopped = Some("поплавок не долетает до воды".to_string());
+            self.stop(state::Stop::BobberStuck);
             log!(
                 "рыбалка остановлена: поплавок не достиг воды за {FLIGHT_TRIES} \
                  попыток, точка заброса {},{} — похоже, мимо воды",
@@ -685,7 +711,7 @@ impl Fishing {
             return;
         }
         if bait == 0 {
-            self.stopped = Some("наживка кончилась".to_string());
+            self.stop(state::Stop::NoBait);
             log!("рыбалка остановлена: наживка кончилась");
             return;
         }
@@ -694,7 +720,7 @@ impl Fishing {
         if free == 0 {
             let quick_stack = state::with(|s| s.quick_stack).unwrap_or(false);
             if !quick_stack {
-                self.stopped = Some("инвентарь полон".to_string());
+                self.stop(state::Stop::InventoryFull);
                 log!("рыбалка остановлена: инвентарь полон, раскладка по сундукам выключена");
                 return;
             }
@@ -716,7 +742,7 @@ impl Fishing {
             self.stack_sent = None;
             self.stack_tries += 1;
             if self.stack_tries > STACK_TRIES {
-                self.stopped = Some("инвентарь полон, сундуков рядом нет".to_string());
+                self.stop(state::Stop::NoChests);
                 log!(
                     "рыбалка остановлена: {STACK_TRIES} раскладок подряд не освободили ни одной ячейки"
                 );

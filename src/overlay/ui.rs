@@ -541,15 +541,27 @@ pub fn build(
     // кнопка ровно на `KNOB_OVER` выше строки с каждой стороны.
     let toggle_gap = (ROW_H + KNOB_OVER * 4.0 + PAD) * scale;
     let t = lang::t();
-    // Подпись авторыбалки меряем с самым длинным припиской: иначе координаты
-    // заброса налезали бы на кнопку переключателя.
+    // Подпись авторыбалки меряем с самой длинной припиской: иначе координаты
+    // заброса или причина остановки налезали бы на кнопку переключателя.
     let aim_sample = lang::fill(t.note_aim, &["1920", "1080"]);
+    let widest_note = [
+        t.note_stop_no_bait,
+        t.note_stop_inventory,
+        t.note_stop_no_chests,
+        t.note_stop_bobber,
+        t.note_recast,
+        t.note_wait_cast,
+    ]
+    .iter()
+    .fold(layout.painter.measure(&aim_sample), |wide, note| {
+        wide.max(layout.painter.measure(note))
+    });
     let longest = t
         .row_labels()
         .iter()
         .map(|label| layout.painter.measure(label) + toggle_gap)
         .chain(std::iter::once(
-            layout.painter.measure(t.auto_fish) + layout.painter.measure(&aim_sample) + toggle_gap,
+            layout.painter.measure(t.auto_fish) + widest_note + toggle_gap,
         ))
         .fold(layout.painter.measure(TITLE), f32::max);
     let panel_w = (longest + pad2)
@@ -651,6 +663,7 @@ pub fn build(
         bobber,
         aim,
         recast,
+        stop,
         free,
         potions,
         potions_missing,
@@ -663,6 +676,7 @@ pub fn build(
             s.status.bobber,
             s.status.aim,
             s.status.recast,
+            s.status.stop,
             s.status.free_slots,
             s.potions,
             s.status.potions_missing,
@@ -676,6 +690,7 @@ pub fn build(
         state::Bobber::None,
         None,
         false,
+        state::Stop::None,
         -1,
         [false; 3],
         [false; 3],
@@ -684,12 +699,23 @@ pub fn build(
     // Точка заброса важна настолько, что выносится прямо в подпись:
     // пока она не запомнена, автомат ничего не делает и молча ждёт.
     let r = next_row(&mut cursor);
-    let (note, note_color) = match (auto_fish, aim, recast) {
-        (false, _, _) => (String::new(), colors::TEXT),
+    // Остановился сам — говорим об этом прямо в строке, красным. Переключатель
+    // при этом уже погашен, но без подписи непонятно, сам он погас или его
+    // выключил игрок, и тем более — почему.
+    let stop_note = match stop {
+        state::Stop::None => None,
+        state::Stop::NoBait => Some(t.note_stop_no_bait),
+        state::Stop::InventoryFull => Some(t.note_stop_inventory),
+        state::Stop::NoChests => Some(t.note_stop_no_chests),
+        state::Stop::BobberStuck => Some(t.note_stop_bobber),
+    };
+    let (note, note_color) = match (stop_note, auto_fish, aim, recast) {
+        (Some(reason), _, _, _) => (reason.to_string(), colors::RARE_RED),
+        (None, false, _, _) => (String::new(), colors::TEXT),
         // Включились при уже заброшенном поплавке: по нему точку не взять.
-        (true, _, true) => (t.note_recast.to_string(), colors::RARE_GREEN),
-        (true, None, _) => (t.note_wait_cast.to_string(), colors::RARE_GREEN),
-        (true, Some((ax, ay)), _) => (
+        (None, true, _, true) => (t.note_recast.to_string(), colors::RARE_GREEN),
+        (None, true, None, _) => (t.note_wait_cast.to_string(), colors::RARE_GREEN),
+        (None, true, Some((ax, ay)), _) => (
             lang::fill(t.note_aim, &[&ax.to_string(), &ay.to_string()]),
             colors::RARE_ORANGE,
         ),
