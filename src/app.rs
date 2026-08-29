@@ -255,6 +255,10 @@ pub fn run(dll_dir: PathBuf) {
         if let Some(attached) = game.as_ref() {
             if last_tick.elapsed() >= TICK_INTERVAL {
                 last_tick = Instant::now();
+                // Игровому потоку нужно знать режим игры: прямая запись
+                // нажатия в объект игрока допустима только в одиночной,
+                // см. `input::set_use_item_on`.
+                input::set_single_player(attached.single_player());
                 fishing.tick(attached, &config);
             }
             // Язык игрок может переключить прямо в игре, не выходя из мира.

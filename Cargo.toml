@@ -1,6 +1,6 @@
 [package]
 name = "terraria-piscatio-automatica"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 # Голые функции (`#[unsafe(naked)]` + `naked_asm!`) стабильны с 1.88 —
 # на них держится детур managed-метода.
@@ -42,8 +42,9 @@ features = [
     "Win32_System_Variant",
     # Оверлей.
     "Win32_Graphics_Direct3D9",
-    # Ловушка на аварийное завершение.
+    # Ловушка на аварийное завершение и минидамп к ней.
     "Win32_System_Diagnostics_Debug",
+    "Win32_Storage_FileSystem",
     "Win32_System_Kernel",
     "Win32_Graphics_Gdi",
     "Win32_System_Memory",

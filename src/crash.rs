@@ -12,20 +12,25 @@
 //! обрабатываются штатно.
 
 use std::ffi::c_void;
+use std::os::windows::io::AsRawHandle;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use windows::Win32::Foundation::{
     EXCEPTION_ACCESS_VIOLATION, EXCEPTION_ILLEGAL_INSTRUCTION, EXCEPTION_STACK_OVERFLOW,
 };
 use windows::Win32::System::Diagnostics::Debug::{
-    AddVectoredExceptionHandler, EXCEPTION_POINTERS, RemoveVectoredExceptionHandler,
-    RtlCaptureStackBackTrace,
+    AddVectoredExceptionHandler, EXCEPTION_POINTERS, MINIDUMP_EXCEPTION_INFORMATION, MINIDUMP_TYPE,
+    MiniDumpWithIndirectlyReferencedMemory, MiniDumpWithThreadInfo, MiniDumpWithUnloadedModules,
+    MiniDumpWriteDump, RemoveVectoredExceptionHandler, RtlCaptureStackBackTrace,
 };
 use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     GetModuleFileNameW, GetModuleHandleExW,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId};
 
 /// Отдать исключение следующему обработчику.
 const CONTINUE_SEARCH: i32 = 0;
@@ -148,7 +153,15 @@ impl Drop for Step {
     }
 }
 
-pub fn install() {
+/// Куда класть минидампы — рядом с логом.
+static DUMP_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// Сколько дампов уже написали: они по несколько мегабайт, и лить их
+/// бесконечно нельзя.
+static DUMPED: AtomicU32 = AtomicU32::new(0);
+const MAX_DUMPS: u32 = 2;
+
+pub fn install(dir: PathBuf) {
+    let _ = DUMP_DIR.set(dir);
     if INSTALLING.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -261,8 +274,67 @@ unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
             " (нас в нём нет — возможно, штатное исключение .NET)"
         }
     );
+    write_dump(info, faulted);
     HANDLING.store(0, Ordering::SeqCst);
     CONTINUE_SEARCH
+}
+
+/// Пишет минидамп рядом с логом.
+///
+/// Строка в логе показывает только адреса, да и стек снимается по цепочке
+/// EBP, а через оптимизированный чужой код она врёт. В дампе же лежат
+/// настоящие стеки всех потоков и список модулей, и разбирается он потом
+/// отладчиком с настоящими символами. Без этого чужое падение у скачавшего
+/// разобрать нечем: у него ни исходников, ни возможности повторить.
+///
+/// Берём облегчённый набор: стеки, потоки и память по ссылкам из них.
+/// Полный слепок кучи у .NET-игры весит под гигабайт, и переслать его никто
+/// не сможет, а на вопрос «чей кадр сломал обход стека» он не отвечает.
+fn write_dump(info: *mut EXCEPTION_POINTERS, thread: u32) {
+    if DUMPED.fetch_add(1, Ordering::SeqCst) >= MAX_DUMPS {
+        return;
+    }
+    let Some(dir) = DUMP_DIR.get() else {
+        return;
+    };
+    let index = DUMPED.load(Ordering::SeqCst);
+    let path = dir.join(format!("piscatio-crash-{index}.dmp"));
+    let Ok(file) = std::fs::File::create(&path) else {
+        crate::log!("минидамп: файл {} создать не вышло", path.display());
+        return;
+    };
+
+    unsafe {
+        let handle = windows::Win32::Foundation::HANDLE(file.as_raw_handle());
+        let mut exception = MINIDUMP_EXCEPTION_INFORMATION {
+            ThreadId: thread,
+            ExceptionPointers: info,
+            // Указатели наши собственные, не чужого процесса.
+            ClientPointers: false.into(),
+        };
+        let kind = MINIDUMP_TYPE(
+            MiniDumpWithIndirectlyReferencedMemory.0
+                | MiniDumpWithThreadInfo.0
+                | MiniDumpWithUnloadedModules.0,
+        );
+        let written = MiniDumpWriteDump(
+            GetCurrentProcess(),
+            GetCurrentProcessId(),
+            handle,
+            kind,
+            Some(&exception),
+            None,
+            None,
+        );
+        let _ = &mut exception;
+        // Файл закроется сам вместе с `file`; хэндл мы только одолжили.
+        drop(file);
+
+        match written {
+            Ok(()) => crate::log!("минидамп записан: {}", path.display()),
+            Err(e) => crate::log!("минидамп записать не вышло: {e}"),
+        }
+    }
 }
 
 /// Адрес в виде `модуль+смещение`: `piscatio.dll+0x1A2B`. По имени модуля

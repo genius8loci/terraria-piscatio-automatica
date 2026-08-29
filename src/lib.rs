@@ -75,7 +75,7 @@ fn start() {
     std::thread::spawn(|| {
         let dir = base_dir();
         logging::init(dir.clone());
-        crash::install();
+        crash::install(dir.clone());
 
         // Паника через FFI-границу убивает игру — гасим её здесь.
         let result = std::panic::catch_unwind(|| app::run(dir));

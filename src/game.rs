@@ -64,6 +64,10 @@ pub struct Game {
     /// иначе стрелки листали бы историю чата и заодно дёргали панель,
     /// а Delete при правке строки выгружал бы DLL.
     f_chat_open: Option<Field>,
+    /// `Main.netMode` — 0 в одиночной игре. По нему решается, можно ли
+    /// ставить нажатие прямой записью в объект игрока: в сетевой `ItemCheck`
+    /// вызывается за каждого, и `this` там не обязательно наш.
+    f_net_mode: Option<Field>,
     f_version: Option<Field>,
     f_mouse_x: Field,
     f_mouse_y: Field,
@@ -182,6 +186,7 @@ impl Game {
             f_projectile: main.field("projectile")?,
             f_throttle: main.field("ThrottleWhenInactive").ok(),
             f_chat_open: main.field("drawingPlayerChat").ok(),
+            f_net_mode: main.field("netMode").ok(),
             f_version: main.field("versionNumber").ok(),
 
             pr_active: projectile.field("active")?,
@@ -270,6 +275,16 @@ impl Game {
             .as_ref()
             .ok_or_else(|| err("поля Main.ThrottleWhenInactive нет"))?;
         Ok(field.get_static()?.as_bool().unwrap_or(true))
+    }
+
+    /// Одиночная ли игра. Поля нет — отвечаем «нет»: в сомнительном случае
+    /// лучше остаться на рефлексии, чем писать байт в чужого игрока.
+    pub fn single_player(&self) -> bool {
+        self.f_net_mode
+            .as_ref()
+            .and_then(|f| f.get_static().ok())
+            .and_then(|v| v.as_int())
+            == Some(0)
     }
 
     /// Открыт ли чат игры. Пока открыт, клавиши принадлежат ему, а не нам.

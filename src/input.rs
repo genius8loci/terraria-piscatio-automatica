@@ -372,7 +372,7 @@ pub fn on_item_check(this: *mut c_void) {
     if release {
         RELEASE.store(false, Ordering::Release);
         let _step = crash::Step::game(crash::STEP_CLICK);
-        set_use_item(handles, false);
+        set_use_item_on(handles, this, false);
     }
 
     if stack {
@@ -395,13 +395,17 @@ pub fn on_item_check(this: *mut c_void) {
     let _step = crash::Step::game(crash::STEP_CLICK);
     match command {
         CMD_PRESS => {
+            // Смещение поля ищем на первом же нажатии: заброс и так уже
+            // требует обращений к CLR, так что лишнего риска здесь нет,
+            // а все следующие нажатия пойдут уже без них.
+            probe_use_item(handles, this);
             let aim_x = AIM_X.load(Ordering::Relaxed);
             let aim_y = AIM_Y.load(Ordering::Relaxed);
             if aim_x >= 0 && aim_y >= 0 {
                 let _ = handles.mouse_x.set_static(Var::int(aim_x));
                 let _ = handles.mouse_y.set_static(Var::int(aim_y));
             }
-            if set_use_item(handles, true) {
+            if set_use_item_on(handles, this, true) {
                 COMMAND.store(CMD_RELEASE, Ordering::Release);
             } else {
                 FAILURES.fetch_add(1, Ordering::Relaxed);
@@ -409,7 +413,7 @@ pub fn on_item_check(this: *mut c_void) {
             }
         }
         CMD_RELEASE => {
-            set_use_item(handles, false);
+            set_use_item_on(handles, this, false);
             COMMAND.store(CMD_NONE, Ordering::Release);
             CLICKS.fetch_add(1, Ordering::Relaxed);
         }
@@ -442,6 +446,140 @@ fn quick_stack(handles: &Handles) {
         }
         Err(e) => crate::log!("разложить по сундукам не удалось: {e}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Нажатие без обращения к CLR
+// ---------------------------------------------------------------------------
+//
+// Ради чего всё это. Выяснено по расшифрованному дампу падения: сборка мусора
+// пошла разбирать стек игрового потока (`Thread::StackWalkFrames` ->
+// `EECodeManager::EnumGcRefs`), приняла мусор за ссылку на объект и умерла
+// в `mark_object_simple`. Причина — наш же детур: он стоит на первых байтах
+// `Player.ItemCheck`, а голая заглушка кладёт на стек десять двойных слов.
+// Сборщик определяет метод по адресу возврата, декодирует его GC-информацию
+// для смещения ноль и ищет ссылки относительно `ESP` — а тот съехал.
+//
+// Само по себе это опасно лишь в момент сборки мусора. Но `MethodInfo.Invoke`
+// и `FieldInfo.SetValue` **сами выделяют память**, то есть каждый вызов
+// рефлексии отсюда мог запустить сборку ровно тогда, когда наш кривой кадр
+// лежит на стеке. Это не гонка, а рулетка.
+//
+// Поэтому нажатие ставится записью одного байта прямо в объект игрока.
+// Смещение поля не зашито: оно вычисляется один раз на живой игре и тут же
+// проверяется через ту же рефлексию. Не сошлось — остаёмся на рефлексии.
+
+/// Смещение `Player.controlUseItem` внутри объекта; 0 — ещё не знаем.
+static USE_ITEM_OFFSET: AtomicUsize = AtomicUsize::new(0);
+/// Вычислять смещение пробуем ровно один раз за сессию.
+static USE_ITEM_PROBED: AtomicBool = AtomicBool::new(false);
+/// Одиночная игра: только в ней `this` в детуре — заведомо наш игрок.
+/// В сетевой `ItemCheck` зовётся за каждого, и писать в чужого нельзя.
+static SINGLE_PLAYER: AtomicBool = AtomicBool::new(false);
+/// Дальше этого от начала объекта не смотрим. `Terraria.Player` большой,
+/// но не настолько.
+const PROBE_LIMIT: usize = 4096;
+
+/// Сообщает, одиночная ли игра. Зовёт рабочий поток по `Main.netMode`.
+pub fn set_single_player(single: bool) {
+    SINGLE_PLAYER.store(single, Ordering::Relaxed);
+}
+
+/// Ставит нажатие. Быстрый путь — запись байта, запасной — рефлексия.
+fn set_use_item_on(handles: &Handles, this: *mut c_void, pressed: bool) -> bool {
+    let offset = USE_ITEM_OFFSET.load(Ordering::Relaxed);
+    if offset != 0 && !this.is_null() && SINGLE_PLAYER.load(Ordering::Relaxed) {
+        unsafe { this.cast::<u8>().add(offset).write(u8::from(pressed)) };
+        return true;
+    }
+    set_use_item(handles, pressed)
+}
+
+/// Сколько байт объекта можно читать, не рискуя выйти за отображённую память.
+fn readable_span(this: *mut c_void) -> usize {
+    use windows::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
+    let mut info = MEMORY_BASIC_INFORMATION::default();
+    let size = size_of::<MEMORY_BASIC_INFORMATION>();
+    if unsafe { VirtualQuery(Some(this), &mut info, size) } == 0 {
+        return 0;
+    }
+    let end = info.BaseAddress as usize + info.RegionSize;
+    let room = end.saturating_sub(this as usize);
+    room.min(PROBE_LIMIT)
+}
+
+/// Ищет смещение `controlUseItem` и проверяет находку.
+///
+/// Всё внутри одного вызова детура: игровой поток стоит здесь же, поэтому
+/// между слепками объект никто не трогает и меняется ровно наше поле.
+/// Если сборка мусора успеет переместить объект, слепки окажутся о разной
+/// памяти — тогда условие «был 0, стал 1, снова 0» не сойдётся ни на одном
+/// байте либо сойдётся на многих, и находку мы отвергнем.
+fn probe_use_item(handles: &Handles, this: *mut c_void) {
+    if USE_ITEM_PROBED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    if this.is_null() || !SINGLE_PLAYER.load(Ordering::Relaxed) {
+        USE_ITEM_PROBED.store(false, Ordering::Relaxed);
+        return;
+    }
+    let span = readable_span(this);
+    // Первые четыре байта — указатель на таблицу методов, полей там нет.
+    if span <= 8 {
+        crate::log!("нажатие: объект игрока прочитать не вышло, остаюсь на рефлексии");
+        return;
+    }
+
+    let bytes = |from: usize| -> Vec<u8> {
+        unsafe { std::slice::from_raw_parts(this.cast::<u8>().add(from), span - from).to_vec() }
+    };
+
+    let before = bytes(4);
+    if !set_use_item(handles, true) {
+        return;
+    }
+    let pressed = bytes(4);
+    if !set_use_item(handles, false) {
+        return;
+    }
+    let released = bytes(4);
+
+    let mut found: Option<usize> = None;
+    let mut count = 0usize;
+    for i in 0..before.len() {
+        if before[i] == 0 && pressed[i] == 1 && released[i] == 0 {
+            count += 1;
+            found = Some(i + 4);
+        }
+    }
+    let Some(offset) = found.filter(|_| count == 1) else {
+        crate::log!(
+            "нажатие: смещение controlUseItem не опознано (подошло байт: {count}), \
+             остаюсь на рефлексии"
+        );
+        return;
+    };
+
+    // Проверка end-to-end: пишем байтом, читаем рефлексией. Совпало в обе
+    // стороны — значит нашли именно то поле, а не соседа.
+    let check = |want: bool| -> bool {
+        unsafe { this.cast::<u8>().add(offset).write(u8::from(want)) };
+        handles
+            .local_player()
+            .and_then(|p| handles.control_use_item.get(&p).ok())
+            .and_then(|v| v.as_bool())
+            == Some(want)
+    };
+    if !check(true) || !check(false) {
+        crate::log!("нажатие: смещение 0x{offset:X} проверку не прошло, остаюсь на рефлексии");
+        return;
+    }
+
+    USE_ITEM_OFFSET.store(offset, Ordering::Relaxed);
+    crate::log!(
+        "нажатие: controlUseItem найден по смещению 0x{offset:X} — \
+         дальше ставим байтом, без обращений к CLR"
+    );
 }
 
 fn set_use_item(handles: &Handles, pressed: bool) -> bool {
