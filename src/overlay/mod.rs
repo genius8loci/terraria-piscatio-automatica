@@ -1177,6 +1177,7 @@ pub fn toggle_expanded() {
 /// Первая же паника гасит панель насовсем — молча повторять её каждый кадр
 /// хуже, чем остаться без интерфейса, а в логе будет видно, что случилось.
 fn guarded(device: *mut c_void, own_cursor: bool) {
+    let _step = crate::crash::Step::game(crate::crash::STEP_DRAW);
     let result = catch_unwind(AssertUnwindSafe(|| unsafe { draw(device, own_cursor) }));
     if result.is_err() && !BROKEN.swap(true, Ordering::SeqCst) {
         crate::log!("оверлей: паника при отрисовке, панель отключена");

@@ -36,9 +36,8 @@ pub(crate) static UNLOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
 ///
 /// Границей для детура `Player.ItemCheck` он больше не служит: свёрнутая
 /// игра обновляется, но не рисует, и счётчик там замирает — на нём при
-/// свёрнутом окне не проходило ни одно нажатие. Тики считает `input::tick_now`
-/// по `Main.GameUpdateCount`, а этот остаётся откатом на случай, если
-/// счётчика тиков в сборке игры не нашлось.
+/// свёрнутом окне не проходило ни одно нажатие. Тики детур считает сам,
+/// по указателю игрока, и к CLR за ними не обращается — см. `input::tick_of`.
 pub(crate) static FRAME: AtomicU32 = AtomicU32::new(0);
 
 static STARTED: AtomicBool = AtomicBool::new(false);

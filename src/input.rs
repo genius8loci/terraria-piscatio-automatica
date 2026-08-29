@@ -11,7 +11,7 @@
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
@@ -61,6 +61,57 @@ pub static STACKS: AtomicU32 = AtomicU32::new(0);
 static LAST_TICK: AtomicU32 = AtomicU32::new(u32::MAX);
 
 // ---------------------------------------------------------------------------
+// Граница игрового тика
+// ---------------------------------------------------------------------------
+//
+// Считается по указателю `this`, без единого обращения к CLR.
+//
+// `Player.ItemCheck` вызывается ровно раз на игрока за тик — замерено:
+// шестьдесят вызовов в секунду при шестидесяти тиках. Порядок игроков внутри
+// тика постоянен, значит новый тик начинается всякий раз, когда снова приходит
+// тот же `this`, с которого тик начался. В одиночной игре игрок один, и каждый
+// вызов — новый тик.
+//
+// Спрашивать номер у самой игры (`Main.GameUpdateCount`) было **нельзя**, и это
+// стоило падения. Вызов рефлексии — это работа в управляемой куче, и делался он
+// шестьдесят раз в секунду прямо из пролога чужого managed-метода, где кадр
+// стека ещё не построен: наш детур стоит на первых байтах `ItemCheck`. Сборка
+// мусора, случившаяся в этот момент, идёт разбирать стек потока и упирается
+// в этот полукадр. В логе это выглядело как `0xC0000005`, чтение по нулю,
+// на игровом потоке, при пустых отметках занятости — потому что отметки
+// у того вызова не было вовсе.
+//
+// Отсюда правило: **на холостом ходу детур не трогает CLR ни разу.**
+
+/// Номер тика. Растёт только на игровом потоке.
+static TICK: AtomicU32 = AtomicU32::new(0);
+/// `this` игрока, с которого начинается тик.
+static TICK_OWNER: AtomicUsize = AtomicUsize::new(0);
+/// Сколько вызовов подряд пришло мимо хозяина тика.
+static TICK_MISSES: AtomicU32 = AtomicU32::new(0);
+/// Столько промахов подряд — и хозяином становится текущий игрок. Нужно, если
+/// прежний вышел из игры или сборщик мусора переместил объект: без этого
+/// граница тика замерла бы навсегда.
+const TICK_REARM: u32 = 64;
+
+/// Номер текущего игрового тика по указателю игрока.
+fn tick_of(this: *mut c_void) -> u32 {
+    let this = this as usize;
+    let owner = TICK_OWNER.load(Ordering::Relaxed);
+    if owner == this {
+        TICK_MISSES.store(0, Ordering::Relaxed);
+        return TICK.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    }
+    if owner == 0 || TICK_MISSES.fetch_add(1, Ordering::Relaxed) >= TICK_REARM {
+        TICK_OWNER.store(this, Ordering::Relaxed);
+        TICK_MISSES.store(0, Ordering::Relaxed);
+        return TICK.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    }
+    // Тот же тик, просто другой игрок.
+    TICK.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
 // Выдержка тиков при свёрнутом окне
 // ---------------------------------------------------------------------------
 //
@@ -88,29 +139,31 @@ pub fn set_window_active(active: bool) {
     INACTIVE.store(!active, Ordering::Relaxed);
 }
 
+/// Впереди ли окно игры — нужно строке падения: свёрнутое окно живёт иначе.
+pub fn window_active() -> bool {
+    !INACTIVE.load(Ordering::Relaxed)
+}
+
 /// Номер тика и время, на которое он был выдержан.
 static PACE: GameThreadCell<Option<(u32, Instant)>> = GameThreadCell(UnsafeCell::new(None));
 
 /// Держит свёрнутую игру на 60 тиках в секунду.
 ///
-/// Возвращает номер текущего тика, если его удалось узнать: он же нужен
-/// дальше как граница тика, и читать его дважды незачем.
-///
 /// Звать только при неактивном окне — отметку прошлого тика сбрасывает
 /// вызывающий, как только окно возвращается.
 ///
+/// Ни одного обращения к CLR: номер тика приходит готовым, см. `tick_of`.
 /// Сон идёт на игровом потоке изнутри managed-метода, то есть сборка мусора
 /// на это время откладывается. Задержка ограничена одним тиком и бывает
 /// только при свёрнутом окне, когда игре и без того нечего рисовать, —
 /// это заметно дешевле, чем сорокакратный разгон мира.
-fn pace(handles: &Handles) -> Option<u32> {
+fn pace(tick: u32) {
     // Без миллисекундного разрешения `Sleep` округляется до 15.6 мс, и вместо
     // шестидесяти тиков вышло бы тридцать два.
     if !PERIOD_RAISED.swap(true, Ordering::Relaxed) {
         let _ = unsafe { timeBeginPeriod(1) };
     }
 
-    let tick = tick_now(handles)?;
     let slot = unsafe { &mut *PACE.0.get() };
     let now = Instant::now();
     match *slot {
@@ -130,7 +183,6 @@ fn pace(handles: &Handles) -> Option<u32> {
         }
         None => *slot = Some((tick, now)),
     }
-    Some(tick)
 }
 
 /// Возвращает системе прежнее разрешение таймера и гасит выдержку: рабочего
@@ -142,31 +194,8 @@ pub fn shutdown() {
     }
 }
 
-/// Номер игрового тика — `Main.GameUpdateCount`.
-///
-/// Именно тик, а не кадр: свёрнутая игра обновляется, но не рисует, поэтому
-/// счётчик кадров из хука `Present` там замирает. На нём граница «нажали —
-/// отпустили» не наступала никогда, и при свёрнутом окне не проходил
-/// ни один заброс — автомат только ставил команды и снимал их по таймауту.
-fn tick_now(handles: &Handles) -> Option<u32> {
-    let source = handles.update_count.as_ref()?;
-    match source {
-        TickSource::Property(getter) => getter.invoke(&Var::null(), &[]).ok()?.as_u32(),
-        TickSource::Field(field) => field.get_static().ok()?.as_u32(),
-    }
-}
-
-/// Откуда брать номер тика: в 1.4.5.8 `GameUpdateCount` — свойство, но
-/// приватное поле за ним читается дешевле, поэтому берём его, если нашлось.
-enum TickSource {
-    Property(Method),
-    Field(Field),
-}
-
 struct Handles {
     _clr: Clr,
-    /// `Main.GameUpdateCount` — счётчик игровых тиков, см. `tick_now`.
-    update_count: Option<TickSource>,
     my_player: Field,
     players: Field,
     mouse_x: Field,
@@ -285,18 +314,19 @@ static HANDLES: GameThreadCell<Option<Handles>> = GameThreadCell(UnsafeCell::new
 static HOVERED: GameThreadCell<Option<Hovered>> = GameThreadCell(UnsafeCell::new(None));
 
 /// Вызывается из детура на входе в `Player.ItemCheck`.
-pub fn on_item_check(_this: *mut c_void) {
+pub fn on_item_check(this: *mut c_void) {
     FIRED.fetch_add(1, Ordering::Relaxed);
+
+    // Номер тика — по указателю игрока, без обращений к CLR: см. `tick_of`.
+    let tick = tick_of(this);
 
     // Выдержку держим всегда, а не только когда есть что делать: без неё
     // свёрнутая игра разгоняет мир, даже если автомат простаивает.
-    let paced_tick = if INACTIVE.load(Ordering::Relaxed) {
-        handles().and_then(pace)
+    if INACTIVE.load(Ordering::Relaxed) {
+        pace(tick);
     } else {
-        // Дёшево и без обращений к CLR: сбрасывает отметку выдержки.
         unsafe { *PACE.0.get() = None };
-        None
-    };
+    }
 
     let command = COMMAND.load(Ordering::Acquire);
     let stack = QUICK_STACK.load(Ordering::Acquire);
@@ -321,13 +351,8 @@ pub fn on_item_check(_this: *mut c_void) {
 
     // В сетевой игре `ItemCheck` вызывается по разу на каждого игрока за тик.
     // Без границы тика нажатие и отпускание слиплись бы в один, и предмет
-    // не сработал бы. Границу даёт счётчик игровых тиков; если его не нашлось,
-    // откатываемся на счётчик кадров — он врёт при свёрнутом окне, но это
-    // лучше, чем слипшаяся пара.
-    let tick = paced_tick
-        .or_else(|| tick_now(handles))
-        .unwrap_or_else(|| crate::FRAME.load(Ordering::Relaxed));
-    if tick != 0 && LAST_TICK.swap(tick, Ordering::Relaxed) == tick {
+    // не сработал бы.
+    if LAST_TICK.swap(tick, Ordering::Relaxed) == tick {
         return;
     }
 
@@ -445,7 +470,6 @@ fn attach() -> Option<Handles> {
         })
     };
     Some(Handles {
-        update_count: tick_source(&main),
         my_player: main.field("myPlayer").ok()?,
         players: main.field("player").ok()?,
         mouse_x: main.field("mouseX").ok()?,
@@ -472,38 +496,6 @@ fn attach() -> Option<Handles> {
         text: text_api(&main, input.as_ref()),
         _clr: clr,
     })
-}
-
-/// Ищет счётчик игровых тиков.
-///
-/// В 1.4.5.8 `Main.GameUpdateCount` — свойство, так что `GetField` по этому
-/// имени ничего не найдёт. Геттер берём первым: у него смысл гарантирован
-/// именем, а шестьдесят вызовов в секунду ничего не стоят. Поле — только
-/// запасной путь, и то лишь публичное, под другую сборку игры: угадывать
-/// приватное имя ради экономии на вызове не стоит риска взять счётчик
-/// чего-то другого и намертво заклинить границу тика.
-fn tick_source(main: &Type) -> Option<TickSource> {
-    if let Ok(getter) = main.method("get_GameUpdateCount")
-        && getter
-            .invoke(&Var::null(), &[])
-            .ok()
-            .and_then(|v| v.as_u32())
-            .is_some()
-    {
-        crate::log!("ввод: счётчик тиков — свойство Main.GameUpdateCount");
-        return Some(TickSource::Property(getter));
-    }
-    if let Ok(field) = main.field("GameUpdateCount")
-        && field.get_static().ok().and_then(|v| v.as_u32()).is_some()
-    {
-        crate::log!("ввод: счётчик тиков — поле Main.GameUpdateCount");
-        return Some(TickSource::Field(field));
-    }
-    crate::log!(
-        "ввод: счётчика тиков не нашлось — граница тика уедет на счётчик \
-         кадров, и при свёрнутой игре нажатия снова перестанут проходить"
-    );
-    None
 }
 
 /// Собирает всё нужное для короткого звука. Не нашлось — просто не будет

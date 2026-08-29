@@ -71,6 +71,9 @@ pub const STEP_CURSOR: u8 = 13;
 pub const STEP_AIM: u8 = 14;
 pub const STEP_BITE: u8 = 15;
 pub const STEP_NAMES: u8 = 16;
+/// Отрисовка панели. Обращений к CLR в ней нет, зато есть чужой девайс
+/// и наша геометрия, так что отличать её от «ничего» стоит.
+pub const STEP_DRAW: u8 = 17;
 
 fn step_name(step: u8) -> &'static str {
     match step {
@@ -90,6 +93,7 @@ fn step_name(step: u8) -> &'static str {
         STEP_AIM => "точка заброса",
         STEP_BITE => "разбор поклёвки",
         STEP_NAMES => "список ловимого и имена",
+        STEP_DRAW => "отрисовка панели",
         _ => "ничего",
     }
 }
@@ -224,12 +228,23 @@ unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
     crate::log!(
         "ПАДЕНИЕ: код 0x{:08X} в {}{detail} \
          | упал поток {} (#{faulted}) \
-         | игровой занят: {}, рабочий занят: {}",
+         | игровой занят: {}, рабочий занят: {} \
+         | окно {}, тиков {}, кадров {}",
         code.0,
         frame_of(address),
         thread_name(faulted),
         step_name(GAME_STEP.load(Ordering::Relaxed)),
-        step_name(WORKER_STEP.load(Ordering::Relaxed))
+        step_name(WORKER_STEP.load(Ordering::Relaxed)),
+        // Свёрнутое окно — отдельная жизнь: кадры не идут, зато выдержка
+        // тиков спит на игровом потоке. Без этого признака по логу не понять,
+        // в каком из двух режимов мы упали.
+        if crate::input::window_active() {
+            "впереди"
+        } else {
+            "свёрнуто"
+        },
+        crate::input::FIRED.load(Ordering::Relaxed),
+        crate::FRAME.load(Ordering::Relaxed)
     );
     // Отдельной строкой: она длинная, и её удобно копировать целиком.
     let stack = backtrace();
@@ -296,7 +311,11 @@ fn module_base(address: usize) -> Option<(String, usize)> {
 /// Зато оно стабильно между запусками, в отличие от адреса.
 fn backtrace() -> String {
     const SKIP: u32 = 1;
-    const DEPTH: usize = 24;
+    /// Первый пойманный крах упёрся ровно в прежний лимит в 24 кадра, и было
+    /// не разобрать, где кончается разбор исключения и начинается настоящая
+    /// причина. Стек снимается один раз за жизнь процесса — на глубине
+    /// экономить незачем.
+    const DEPTH: usize = 64;
     let mut frames = [std::ptr::null_mut::<c_void>(); DEPTH];
     let captured = unsafe { RtlCaptureStackBackTrace(SKIP, &mut frames, None) } as usize;
     if captured == 0 {

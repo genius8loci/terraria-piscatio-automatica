@@ -29,6 +29,10 @@ const LANG_INTERVAL: Duration = Duration::from_secs(2);
 /// Игра может быть ещё в сплэше — сборка Terraria появится не сразу.
 const ATTACH_RETRY: Duration = Duration::from_millis(750);
 const ATTACH_ATTEMPTS: u32 = 40;
+/// Как часто повторять попытку получить список ловимого. Числа попыток нет:
+/// игрок может сидеть в главном меню сколько угодно, а список нужен ровно
+/// с того мгновения, как он войдёт в мир.
+const FISHABLE_RETRY: Duration = Duration::from_secs(2);
 
 /// Отслеживает нажатие клавиши по фронту, а не по удержанию.
 struct KeyEdge {
@@ -111,6 +115,10 @@ pub fn run(dll_dir: PathBuf) {
     // Иначе наша правка уезжает в `config.json` игры (она сохраняет это поле
     // при выходе) и разгоняет мир при сворачивании уже без всякой DLL.
     let mut throttle_was: Option<bool> = None;
+    // Список ловимого: одной попытки на подключении мало, см. `load_fishable`.
+    let mut fishable_ready = false;
+    let mut fishable_tries: u32 = 0;
+    let mut next_fishable = Instant::now();
 
     let mut fishing = Fishing::new();
     let mut last_tick = Instant::now() - TICK_INTERVAL;
@@ -161,7 +169,7 @@ pub fn run(dll_dir: PathBuf) {
             attempts += 1;
             let verbose = attempts == 1 || attempts.is_multiple_of(10);
             match Game::attach(verbose) {
-                Ok(mut attached) => {
+                Ok(attached) => {
                     log!("подключились к игре с попытки {attempts}");
                     let version = attached.version();
                     state::with(|s| {
@@ -194,7 +202,9 @@ pub fn run(dll_dir: PathBuf) {
                     } else {
                         log!("детур DrawCursor отключён в конфиге");
                     }
-                    load_fishable(&mut attached);
+                    // Список ловимого спрашиваем не здесь: он бывает ещё
+                    // не готов, и попытка нужна не одна. Разбирается ниже.
+                    next_fishable = Instant::now();
                     game = Some(attached);
                 }
                 Err(e) => {
@@ -211,6 +221,23 @@ pub fn run(dll_dir: PathBuf) {
                     }
                     next_attach = Instant::now() + ATTACH_RETRY;
                 }
+            }
+        }
+
+        // Список ловимого игра готовит не сразу: при инжекте в ещё
+        // загружающуюся игру `Main.FishDropsDB` пуст, а имена предметов
+        // спрашиваются через экземпляр `Item` из инвентаря, которого до входа
+        // в мир тоже нет. Одной попытки на подключении поэтому мало: она
+        // молча оставляла панель без иконок, а фильтр — пустым, до самой
+        // перезагрузки игры. Пробуем, пока не выйдет.
+        if !fishable_ready
+            && Instant::now() >= next_fishable
+            && let Some(attached) = game.as_mut()
+        {
+            fishable_tries += 1;
+            fishable_ready = load_fishable(attached, fishable_tries);
+            if !fishable_ready {
+                next_fishable = Instant::now() + FISHABLE_RETRY;
             }
         }
 
@@ -323,11 +350,17 @@ fn pull_config(config: &mut Config) {
 }
 
 /// Список ловимого берём у игры и отдаём оверлею под атлас иконок.
-fn load_fishable(game: &mut Game) {
+///
+/// Возвращает, получилось ли. Не получилось — значит игра ещё не готова
+/// (`Main.FishDropsDB` заполняется не сразу, а имена берутся через экземпляр
+/// `Item` из инвентаря игрока, которого до входа в мир нет), и вызывать
+/// нас будут снова. В лог о неудаче пишем не каждый раз: попытки идут
+/// раз в пару секунд и залили бы файл, пока игрок сидит в меню.
+fn load_fishable(game: &mut Game, attempt: u32) -> bool {
     let _step = crash::Step::worker(crash::STEP_NAMES);
     match game.fishable_items() {
-        Ok(items) => {
-            log!("ловится предметов: {}", items.len());
+        Ok(items) if !items.is_empty() => {
+            log!("ловится предметов: {} (с попытки {attempt})", items.len());
             // В атлас кладём ещё и зелья: без них ячейки автопитья пустые.
             let mut icons = items.clone();
             icons.extend(crate::game::POTIONS.iter().map(|(item, _, _)| *item));
@@ -365,13 +398,33 @@ fn load_fishable(game: &mut Game) {
                 }
             }
             log!("имён предметов получено: {}", names.len());
+            // Без имён фильтру нечем искать, а чату — нечем подписывать улов.
+            // Их отсутствие означает, что игрок ещё не в мире: пробуем снова.
+            if names.is_empty() {
+                if attempt == 1 {
+                    log!("имён предметов пока нет — игрок ещё не в мире, повторю");
+                }
+                return false;
+            }
 
             state::with(|s| {
                 s.fishable = items;
                 s.names = names;
             });
+            true
         }
-        Err(e) => log!("список ловимого получить не удалось: {e}"),
+        Ok(_) => {
+            if attempt == 1 {
+                log!("список ловимого пока пуст — игра ещё не готова, повторю");
+            }
+            false
+        }
+        Err(e) => {
+            if attempt == 1 {
+                log!("список ловимого получить не удалось ({e}) — повторю");
+            }
+            false
+        }
     }
 }
 

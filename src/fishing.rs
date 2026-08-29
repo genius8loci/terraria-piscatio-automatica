@@ -404,7 +404,10 @@ impl Fishing {
     /// Тот поплавок, что лежал в воде до включения, не в счёт: курсор с его
     /// заброса давно уехал, и точка вышла бы заведомо неверной.
     fn remember_aim(&mut self, game: &Game) {
-        if self.aim.is_some() || self.wait_recast {
+        // Пока рыбалка выключена, точка не нужна и всё равно забудется при
+        // следующем включении: без этой проверки в лог падала строка
+        // «точка заброса запомнена» на чужой, ручной заброс игрока.
+        if !self.enabled() || self.aim.is_some() || self.wait_recast {
             return;
         }
         let _step = crash::Step::worker(crash::STEP_AIM);
