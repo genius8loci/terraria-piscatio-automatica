@@ -1,5 +1,7 @@
 <div align="center">
 
+[English](README.md) · **Русский**
+
 # 🎣 terraria piscatio automatica
 
 ### Авторыбалка для Terraria 1.4.5 — с фильтром улова, автопитьём зелий и раскладкой по сундукам
@@ -175,24 +177,6 @@ DLL была занята. Пришлите её — по ней видно, ч�
 Логи и скриншоты очень помогают.
 
 </div>
-
----
-
-## In English
-
-**terraria-piscatio-automatica** is an injectable auto-fishing DLL for
-**Terraria 1.4.5.8** (x86). It casts to a remembered spot, hooks only what
-your filter allows, auto-drinks fishing / sonar / crate potions, quick-stacks
-a full inventory into nearby chests, and keeps running while the game is
-minimised.
-
-Skipping a catch is free: Terraria rolls the loot **before** the hook, and
-bait is only consumed on a successful pull. The panel is drawn with the
-game's own textures and speaks English automatically when your Terraria does.
-
-Tested with [Extreme Injector v3](https://github.com/master131/ExtremeInjector).
-Bugs and ideas → [issues](https://github.com/genius8loci/terraria-piscatio-automatica/issues)
-or [Telegram](https://t.me/terraria_piscatio_automatica).
 
 ---
 
