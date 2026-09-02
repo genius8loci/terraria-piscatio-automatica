@@ -70,6 +70,8 @@ pub struct Strings {
     pub bobber_none: &'static str,
     pub free_slots: &'static str,
     pub auto_potions: &'static str,
+    /// Приписка к строке автопитья: включено, но рыбалка ещё не идёт.
+    pub note_potions_idle: &'static str,
     pub potions_shelf: &'static str,
     pub tab_filter: &'static str,
     pub tab_stats: &'static str,
@@ -109,16 +111,15 @@ pub struct Strings {
 
 impl Strings {
     /// Подписи строк основного окна — по самой длинной из них считается
-    /// ширина панели. Приписки авторыбалки здесь нет: она меряется отдельно,
-    /// вместе с самой подписью.
-    pub fn row_labels(&self) -> [&'static str; 6] {
+    /// ширина панели. Строк с припиской (авторыбалка, автопитьё) и полки
+    /// с ячейками здесь нет: они меряются отдельно, вместе со своей припиской
+    /// и рядом ячеек.
+    pub fn row_labels(&self) -> [&'static str; 4] {
         [
             self.quick_stack,
             self.pull_enemies,
             self.bobber,
             self.free_slots,
-            self.auto_potions,
-            self.potions_shelf,
         ]
     }
 }
@@ -139,13 +140,14 @@ pub static RU: Strings = Strings {
     bobber_flying: "Летит",
     bobber_none: "Нет",
     free_slots: "Свободные ячейки",
-    auto_potions: "Автопитьё зелий",
-    potions_shelf: "Зелья для автоиспользования:",
+    auto_potions: "Автопитьё",
+    note_potions_idle: " (ждёт заброса)",
+    potions_shelf: "Предметы для автоиспользования:",
     tab_filter: "Фильтр",
     tab_stats: "Статистика",
 
     search_hint: "Имя:",
-    hint_no_potion: "Этого зелья нет в инвентаре.\nПоложите его в инвентарь, чтобы включить автопитьё.",
+    hint_no_potion: "Этого предмета нет в инвентаре.\nПоложите его в инвентарь, чтобы включить автопитьё.",
     hint_list_black: "Чёрный список: беру всё,\nкроме отмеченного красным.\nЩелчок — сменить на белый.",
     hint_list_white: "Белый список: беру только\nотмеченное зелёным.\nЩелчок — сменить на чёрный.",
 
@@ -154,14 +156,14 @@ pub static RU: Strings = Strings {
     stat_crates: "Поймано ящиков",
     stat_skipped: "Пропущено по фильтру",
     stat_bite: "Среднее время поклёвки",
-    stat_potions: "Зелья выпито",
+    stat_potions: "Выпито зелий и еды",
     stat_seconds: "{} сек.",
 
     chat_blacklist: "Чёрный список",
     chat_whitelist: "Белый список",
     chat_quest: "Квест рыбака",
     chat_spawn: "Спавн",
-    chat_potion: "Зелье",
+    chat_potion: "Автопитьё",
     chat_info: "Инфо",
     chat_flight_lost: "поплавок не достиг воды после {} попыток, авторыбалка остановлена",
     chat_item_skipped: "пропущен предмет {}",
@@ -187,13 +189,14 @@ pub static EN: Strings = Strings {
     bobber_flying: "In flight",
     bobber_none: "None",
     free_slots: "Free slots",
-    auto_potions: "Auto-drink potions",
-    potions_shelf: "Potions to use automatically:",
+    auto_potions: "Auto-drink",
+    note_potions_idle: " (waiting for the cast)",
+    potions_shelf: "Items to use automatically:",
     tab_filter: "Filter",
     tab_stats: "Statistics",
 
     search_hint: "Name:",
-    hint_no_potion: "You have none of this potion.\nPut one in your inventory to enable auto-drinking.",
+    hint_no_potion: "You have none of this item.\nPut one in your inventory to enable auto-drinking.",
     hint_list_black: "Blacklist: keeping everything\nexcept what is marked red.\nClick to switch to a whitelist.",
     hint_list_white: "Whitelist: keeping only\nwhat is marked green.\nClick to switch to a blacklist.",
 
@@ -202,14 +205,14 @@ pub static EN: Strings = Strings {
     stat_crates: "Crates caught",
     stat_skipped: "Skipped by filter",
     stat_bite: "Average time to bite",
-    stat_potions: "Potions drunk",
+    stat_potions: "Potions and food drunk",
     stat_seconds: "{} sec.",
 
     chat_blacklist: "Blacklist",
     chat_whitelist: "Whitelist",
     chat_quest: "Angler quest",
     chat_spawn: "Spawn",
-    chat_potion: "Potion",
+    chat_potion: "Auto-drink",
     chat_info: "Info",
     chat_flight_lost: "the bobber never reached water after {} tries, auto-fishing stopped",
     chat_item_skipped: "skipped {}",

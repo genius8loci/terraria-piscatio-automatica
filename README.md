@@ -4,7 +4,7 @@
 
 # 🎣 terraria piscatio automatica
 
-### Auto-fishing for Terraria 1.4.5 — with a catch filter, potion auto-drinking and quick-stacking into chests
+### Auto-fishing for Terraria 1.4.5 — with a catch filter, auto-drinking and quick-stacking into chests
 
 **Fishes on its own. Keeps only what you want. Runs while the game is minimised.**
 
@@ -12,7 +12,7 @@
 [![Telegram](https://img.shields.io/badge/Telegram-channel-2AABEE?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/terraria_piscatio_automatica)
 [![Bugs and ideas](https://img.shields.io/badge/bugs%20and%20ideas-issues-24292f?style=for-the-badge&logo=github)](https://github.com/genius8loci/terraria-piscatio-automatica/issues)
 
-<img src="docs/img/panel.png" width="620" alt="Terraria auto-fishing panel — rod autoclicker, catch filter, potion auto-drinking">
+<img src="docs/img/panel.png" width="620" alt="Terraria auto-fishing panel — rod autoclicker, catch filter, auto-drinking">
 
 </div>
 
@@ -54,11 +54,14 @@ as many times as you like.
 
 <img src="docs/img/filter.png" width="620" alt="Terraria catch filter — fish blacklist and whitelist, search by name">
 
-### 🧪 Potion auto-drinking
+### 🧪 Auto-drinking
 
-Tops up the Fishing, Sonar and Crate buffs as soon as they run out. A potion
-you don't have in your inventory is crossed out and never clicked — with a
-tooltip saying what to bring.
+Tops up the Fishing, Sonar and Crate buffs as soon as they run out, with two
+more slots for Ale and Sake — their Tipsy buff is worth +5 fishing power, the
+same as fishing while sitting. It only drinks while fishing is actually running
+— switched on and the cast point locked — so no buff burns away while you look
+for a spot. An item you don't have in your inventory is crossed out and never
+clicked — with a tooltip saying what to bring.
 
 ### 📦 Quick-stack into chests
 
@@ -68,7 +71,7 @@ your catch.
 
 ### 💬 Tells you in chat what it is doing
 
-A skip by filter, a quest fish, a spawn, a potion drunk — one line in chat,
+A skip by filter, a quest fish, a spawn, a potion or a drink used — one line in chat,
 with the item icon and a tooltip on hover. Colours are configurable.
 The messages are visible only to you and never leave for the server.
 
@@ -77,7 +80,7 @@ The messages are visible only to you and never leave for the server.
 ### 📊 Statistics
 
 Time fishing, items caught, crates, skipped, average time to bite,
-potions drunk.
+potions and food drunk.
 
 <img src="docs/img/stats.png" width="620" alt="Terraria fishing statistics — catch, crates, average time to bite">
 

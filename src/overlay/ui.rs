@@ -563,9 +563,15 @@ pub fn build(
         hovered: None,
     };
 
+    // Ячейки берём размером ровно с инвентарные: `52 * Main.inventoryScale`,
+    // и без нашего уплотнения — иначе иконки не совпадут с игровыми.
+    let slot = (super::SLOT_TEXTURE_SIZE * super::INVENTORY_SCALE * ui_scale).round();
+    let cells = crate::game::POTION_SLOTS as f32;
+
     // Ширину задаёт содержимое: самая длинная подпись или заголовок из
     // `Cargo.toml`, чей размер заранее неизвестен. Шире экрана при этом
     // панель не становится.
+    let pad = (PAD * scale).round();
     let pad2 = (PAD * 2.0 * scale).round();
     // Справа от подписи должно остаться место под кнопку и просвет перед ней:
     // кнопка ровно на `KNOB_OVER` выше строки с каждой стороны.
@@ -586,13 +592,21 @@ pub fn build(
     .fold(layout.painter.measure(&aim_sample), |wide, note| {
         wide.max(layout.painter.measure(note))
     });
+    // Полка автопитья меряется не по подписи с кнопкой, а по подписи с целым
+    // рядом ячеек: их пять, и на узкой панели они наезжали бы на текст.
+    let shelf_w =
+        layout.painter.measure(t.potions_shelf) + pad + slot * cells + GAP * scale * (cells + 1.0);
     let longest = t
         .row_labels()
         .iter()
         .map(|label| layout.painter.measure(label) + toggle_gap)
-        .chain(std::iter::once(
+        .chain([
             layout.painter.measure(t.auto_fish) + widest_note + toggle_gap,
-        ))
+            layout.painter.measure(t.auto_potions)
+                + layout.painter.measure(t.note_potions_idle)
+                + toggle_gap,
+            shelf_w,
+        ])
         .fold(layout.painter.measure(TITLE), f32::max);
     let panel_w = (longest + pad2)
         .max(PANEL_MIN_W * scale)
@@ -643,11 +657,7 @@ pub fn build(
 
     let row_h = (ROW_H * scale).round();
     let row_gap = (GAP * 0.5 * scale).round();
-    // Ячейки берём размером ровно с инвентарные: `52 * Main.inventoryScale`,
-    // и без нашего уплотнения — иначе иконки не совпадут с игровыми.
-    let slot = (super::SLOT_TEXTURE_SIZE * super::INVENTORY_SCALE * ui_scale).round();
-    let pad = (PAD * scale).round();
-    // Заголовок, шесть строк, полка зелий и ряд вкладок.
+    // Заголовок, шесть строк, полка автопитья и ряд вкладок.
     let main_h = pad * 2.0 + row_h + (row_h + row_gap) * 6.0 + slot + GAP * scale + row_h;
     let main = Rect {
         x,
@@ -722,8 +732,8 @@ pub fn build(
         false,
         state::Stop::None,
         -1,
-        [false; 3],
-        [false; 3],
+        [false; crate::game::POTION_SLOTS],
+        [false; crate::game::POTION_SLOTS],
     ));
 
     // Точка заброса важна настолько, что выносится прямо в подпись:
@@ -794,19 +804,34 @@ pub fn build(
     layout.value_row(r, t.free_slots, &value, colors::VALUE);
 
     // --- автопитьё ---------------------------------------------------------
+    // Пьётся только во время рыбалки, поэтому включённое питьё при выключенной
+    // рыбалке (или пока точка заброса не взята) говорит, чего именно ждёт:
+    // иначе оно выглядит сломанным.
     let r = next_row(&mut cursor);
-    if layout.switch_row_knob(r, t.auto_potions, POTION, auto_potions) {
+    let potions_note = if auto_potions && (!auto_fish || aim.is_none()) {
+        t.note_potions_idle
+    } else {
+        ""
+    };
+    if layout.switch_row_note(
+        r,
+        t.auto_potions,
+        potions_note,
+        colors::MUTED,
+        POTION,
+        auto_potions,
+    ) {
         state::with(|s| {
             s.auto_potions = !s.auto_potions;
             s.dirty = true;
         });
     }
 
-    // --- ячейки зелий ------------------------------------------------------
+    // --- ячейки автопитья --------------------------------------------------
     // Подпись на такой же подложке, что и строки выше, только высотой
     // с обычную строку и обрывается перед ячейками: так она встаёт в один
     // ряд с остальным текстом, а не висит на голой панели.
-    let mut slot_x = inner_x + inner_w - slot * 3.0 - GAP * 2.0 * scale;
+    let mut slot_x = inner_x + inner_w - slot * cells - GAP * (cells - 1.0) * scale;
     let shelf = Rect {
         x: inner_x,
         y: (cursor + (slot - row_h) * 0.5).round(),

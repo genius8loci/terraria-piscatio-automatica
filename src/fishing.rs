@@ -11,7 +11,7 @@ use crate::chat;
 use crate::config::Config;
 use crate::crash;
 use crate::detour;
-use crate::game::{Game, POTIONS, Stock};
+use crate::game::{Game, POTION_SLOTS, POTIONS, Stock};
 use crate::input;
 use crate::log;
 use crate::overlay::state;
@@ -575,18 +575,23 @@ impl Fishing {
             }
             None => {
                 s.status.free_slots = -1;
-                s.status.potions_missing = [false; 3];
+                s.status.potions_missing = [false; POTION_SLOTS];
             }
         });
         stock
     }
 
     /// Автопитьё: доливаем только те бафы, что выбраны в панели и погасли.
+    ///
+    /// Пьём лишь пока рыбалка действительно идёт — включена и точка заброса
+    /// уже зафиксирована. Переключатель в панели остаётся главным флагом,
+    /// но сам по себе он больше ничего не пьёт: иначе бафы горели впустую,
+    /// пока игрок ищет место и настраивается.
     fn drink_potions(&mut self, game: &Game, config: &Config) {
         let _step = crash::Step::worker(crash::STEP_POTIONS);
         let (enabled, selected) =
-            state::with(|s| (s.auto_potions, s.potions)).unwrap_or((false, [false; 3]));
-        if !enabled {
+            state::with(|s| (s.auto_potions, s.potions)).unwrap_or((false, [false; POTION_SLOTS]));
+        if !enabled || !self.enabled() || self.aim.is_none() {
             return;
         }
         let Ok(Some(player)) = game.local_player() else {
@@ -604,12 +609,17 @@ impl Fishing {
             };
             match game.drink(&player, slot, *buff) {
                 Ok(()) => {
-                    log!("выпито зелье {name}");
+                    log!("выпито: {name}");
                     state::with(|s| s.stats.potions += 1);
+                    // Анимации у глотка нет и быть не может: она принадлежит
+                    // предмету в руке, а в руке удочка. Ровно так же ведёт
+                    // себя и быстрое питьё самой игры (`Player.QuickBuff`) —
+                    // от него остаётся только звук, и его мы повторяем.
+                    input::request_sound(input::SOUND_DRINK);
                     let shown = Self::display_name(*item);
                     chat::potion_used(config, *item, &shown);
                 }
-                Err(e) => log!("зелье {name} выпить не вышло: {e}"),
+                Err(e) => log!("выпить {name} не вышло: {e}"),
             }
         }
     }

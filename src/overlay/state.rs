@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::game::POTION_SLOTS;
+
 /// Отметка предмета в фильтре.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mark {
@@ -79,10 +81,10 @@ pub struct Status {
     pub stop: Stop,
     pub free_slots: i32,
     pub detour_ready: bool,
-    /// Каких из трёх зелий сейчас нет в инвентаре. Именно «нет», а не «есть»:
-    /// до первого опроса игры здесь нули, и панель молчит вместо того, чтобы
-    /// перечеркнуть все три ячейки на пустом месте.
-    pub potions_missing: [bool; 3],
+    /// Чего из ячеек автопитья сейчас нет в инвентаре. Именно «нет», а не
+    /// «есть»: до первого опроса игры здесь нули, и панель молчит вместо
+    /// того, чтобы перечеркнуть все ячейки на пустом месте.
+    pub potions_missing: [bool; POTION_SLOTS],
 }
 
 #[derive(Default)]
@@ -102,8 +104,8 @@ pub struct Shared {
     /// Подсекать ли вражеские спавны: Герцог Рыброн и прочая нежить.
     pub pull_enemy_spawns: bool,
     pub whitelist_mode: bool,
-    /// Какие из трёх зелий пить.
-    pub potions: [bool; 3],
+    /// Какие ячейки автопитья включены, по порядку `game::POTIONS`.
+    pub potions: [bool; POTION_SLOTS],
     pub filter: HashMap<i32, Mark>,
     /// Что вообще ловится — берётся из `Main.FishDropsDB`.
     pub fishable: Vec<i32>,
@@ -128,7 +130,7 @@ impl Default for Shared {
             auto_potions: false,
             pull_enemy_spawns: false,
             whitelist_mode: false,
-            potions: [true, false, true],
+            potions: [true, false, true, false, false],
             filter: HashMap::new(),
             fishable: Vec::new(),
             names: HashMap::new(),

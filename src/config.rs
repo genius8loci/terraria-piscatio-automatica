@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::game::POTION_SLOTS;
 
 /// Режим фильтра улова. По умолчанию чёрный список: тянем всё, кроме мусора.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,10 +42,12 @@ pub struct Config {
     pub jitter_min_ms: u64,
     pub jitter_max_ms: u64,
 
-    /// Автопитьё зелий.
+    /// Автопитьё: пить самому во время рыбалки.
     pub auto_potions: bool,
-    /// Какие из трёх зелий пить: Fishing / Sonar / Crate.
-    pub potions: [bool; 3],
+    /// Что именно пить, по порядку `game::POTIONS`:
+    /// Fishing / Sonar / Crate / Ale / Sake.
+    #[serde(deserialize_with = "potion_flags")]
+    pub potions: [bool; POTION_SLOTS],
 
     /// Виртуальные коды клавиш. По умолчанию стрелка вверх, стрелка вниз
     /// и Delete.
@@ -63,6 +67,21 @@ pub struct Config {
     pub chat_color_potion: String,
     /// Служебные сообщения автомата: например, что рыбалка остановлена.
     pub chat_color_info: String,
+}
+
+/// Читает список ячеек автопитья любой длины.
+///
+/// В конфигах, написанных до появления эля и сакэ, флагов три. Требовать
+/// ровно пять значит объявить весь конфиг битым и молча заменить его
+/// значениями по умолчанию — вместе с фильтром улова, который игрок
+/// собирал руками. Недостающие ячейки гасим, лишние отбрасываем.
+fn potion_flags<'de, D: Deserializer<'de>>(de: D) -> Result<[bool; POTION_SLOTS], D::Error> {
+    let list = Vec::<bool>::deserialize(de)?;
+    let mut flags = [false; POTION_SLOTS];
+    for (flag, value) in flags.iter_mut().zip(list) {
+        *flag = value;
+    }
+    Ok(flags)
 }
 
 /// Приводит цвет из конфига к шести шестнадцатеричным цифрам, как ждёт
@@ -95,7 +114,10 @@ impl Default for Config {
             jitter_min_ms: 120,
             jitter_max_ms: 480,
             auto_potions: false,
-            potions: [true, false, true],
+            // Эль и сакэ по умолчанию выключены: к рыбалке их бафф идёт
+            // в плюс, но за него платят четвёркой защиты, да и в инвентаре
+            // они у большинства не лежат. Решает игрок.
+            potions: [true, false, true, false, false],
             hotkey_ui: 0x26,     // VK_UP
             hotkey_toggle: 0x28, // VK_DOWN
             hotkey_unload: 0x2E, // VK_DELETE
@@ -157,8 +179,12 @@ impl Config {
             FilterMode::Whitelist => "whitelist",
         };
         let potions = format!(
-            "[{}, {}, {}]",
-            self.potions[0], self.potions[1], self.potions[2]
+            "[{}]",
+            self.potions
+                .iter()
+                .map(|on| on.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         format!(
             "# Настройки terraria piscatio automatica.\n\
@@ -195,11 +221,14 @@ impl Config {
              jitter_min_ms = {jitter_min_ms}\n\
              jitter_max_ms = {jitter_max_ms}\n\
              \n\
-             # Доливать бафы зельями из инвентаря.\n\
+             # Доливать бафы из инвентаря самому. Работает только пока идёт\n\
+             # авторыбалка: включена и точка заброса уже зафиксирована.\n\
              auto_potions = {auto_potions}\n\
              \n\
-             # Какие из трёх зелий пить, по порядку:\n\
-             #   рыбалки (2354), сонара (2355), ящиков (2356).\n\
+             # Что пить, по порядку: зелья рыбалки (2354), сонара (2355),\n\
+             #   ящиков (2356), затем эль (353) и сакэ (2266).\n\
+             # Эль и сакэ дают один и тот же бафф Tipsy, так что при двух\n\
+             #   включённых пьётся только эль — сакэ ждёт, пока бафф спадёт.\n\
              potions = {potions}\n\
              \n\
              # Виртуальные коды клавиш (VK). По умолчанию стрелка вверх,\n\
@@ -270,7 +299,7 @@ mod tests {
             filter_mode: FilterMode::Whitelist,
             whitelist: vec![2290, 2297],
             blacklist: vec![],
-            potions: [false, true, false],
+            potions: [false, true, false, true, false],
             jitter_min_ms: 7,
             chat_messages: false,
             chat_color_quest: "ABCDEF".to_string(),
@@ -281,6 +310,18 @@ mod tests {
         let read: Config = toml::from_str(&text).expect("конфиг не читается обратно");
 
         assert_eq!(read, written, "поле потерялось при сохранении");
+    }
+
+    /// Конфиг с тремя ячейками автопитья писали версии до эля и сакэ.
+    /// Строгий массив на пять сделал бы такой файл битым целиком, и игрок
+    /// молча потерял бы вместе с ним свой фильтр улова.
+    #[test]
+    fn old_three_slot_potions_still_load() {
+        let text = "potions = [true, false, true]\nblacklist = [2337]\n";
+        let read: Config = toml::from_str(text).expect("старый конфиг не читается");
+
+        assert_eq!(read.potions, [true, false, true, false, false]);
+        assert_eq!(read.blacklist, vec![2337], "остальное должно уцелеть");
     }
 
     /// Цвет из конфига должен доезжать до тега игры в шести цифрах,

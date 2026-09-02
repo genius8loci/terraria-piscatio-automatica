@@ -52,6 +52,9 @@ pub const SOUND_QUEST: u8 = 1;
 pub const SOUND_TICK: u8 = 2;
 /// Служебное сообщение автомата в чат: `SoundID.Chat` (24).
 pub const SOUND_CHAT: u8 = 4;
+/// Глоток автопитья: `SoundID.Item3`, тот же звук, что у зелий и еды в руках
+/// игрока (`Item.UseSound` у всех пяти наших предметов именно он).
+pub const SOUND_DRINK: u8 = 8;
 /// Сколько строк держим, если игровой поток почему-то их не разбирает.
 const CHAT_LIMIT: usize = 32;
 /// Экранные координаты прицела; -1 — не трогать курсор.
@@ -799,8 +802,8 @@ fn chat_queue() -> std::sync::MutexGuard<'static, Vec<String>> {
     CHAT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Поставить в очередь звук квестовой рыбы. Сыграет его игровой поток
-/// в ближайшем кадре, см. `play_sound`.
+/// Поставить в очередь звук, см. константы `SOUND_*`. Сыграет его игровой
+/// поток в ближайшем кадре, см. `play_sound`.
 pub fn request_sound(kind: u8) {
     SOUND.fetch_or(kind, Ordering::Release);
 }
@@ -855,12 +858,20 @@ fn play_sound(handles: &Handles, wanted: u8) {
     if wanted & SOUND_CHAT != 0 {
         play(SOUND_ID_CHAT, 1);
     }
+    // А тут вариант — настоящий номер: у звуков предметов один тип (2)
+    // и много вариантов, и `SoundID.Item3` это `LegacySoundStyle(2, 3)`.
+    if wanted & SOUND_DRINK != 0 {
+        play(SOUND_ID_ITEM, SOUND_ITEM_DRINK);
+    }
 }
 
 /// `SoundID.MenuTick` — щелчок при наведении и нажатии в меню игры.
 const SOUND_ID_MENU_TICK: i32 = 12;
 /// `SoundID.Chat` — звук появления строки в чате.
 const SOUND_ID_CHAT: i32 = 24;
+/// Тип «звук предмета» и вариант глотка в нём: `SoundID.Item3`.
+const SOUND_ID_ITEM: i32 = 2;
+const SOUND_ITEM_DRINK: i32 = 3;
 
 /// Отдаёт накопленные строки чату игры. Только с игрового потока: чат —
 /// её собственный список, и правит его она сама в своём кадре.
